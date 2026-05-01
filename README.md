@@ -14,7 +14,7 @@
 | `Firmware/System/` | 系统能力：`scheduler`（周期任务）、`fw_fault`（故障码占位）。 |
 | `Firmware/BSP/` | 板级初始化钩子：`Bsp_Init()` 在 `MX_*` 之后调用，适合放“与具体引脚相关、但尚不属于某一设备”的收尾。 |
 | `Firmware/App/` | 应用入口 `App_Init()`、`App_StartScheduling()`，以及 `app_tasks.c` 中**周期任务注册与实现**。 |
-| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`、`debug_uart`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
+| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`、`debug_uart`、`gw_gray_sensor`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
 | `DFcontrol_stm32.ioc` | CubeMX 工程；改时钟/引脚/外设后重新生成代码，注意保留 `main.c` 中 USER 区修改。 |
 
 ---
@@ -22,7 +22,7 @@
 ## 程序启动顺序
 
 1. `HAL_Init()` → `SystemClock_Config()`  
-2. `MX_GPIO_Init()`、`MX_UART4_Init()`、`MX_USART1_UART_Init()`（以外设实际配置为准）  
+2. `MX_GPIO_Init()`、`MX_I2C1_Init()`、`MX_UART4_Init()`、`MX_USART1_UART_Init()` 等（以外设实际配置为准）  
 3. **`App_Init()`**：`Fault_Init()`、`Bsp_Init()`（内部可再调各驱动的 `*_Init()`）  
 4. **`App_StartScheduling()`**：`Scheduler_Init()` + `App_RegisterTasks()`  
 5. 主循环：**`Scheduler_RunPending()`**（按节拍调用已到期的周期任务）
@@ -50,6 +50,34 @@
 - 文件：`Firmware/Drivers/buzzer_drv.c`，**PA11 高电平有效**（Cube 中已配置为输出）。  
 - **非阻塞**定长：`BuzzerDrv_Beep(ms)` 依赖 **`BuzzerDrv_Process()` 在约 1 ms 周期被调用**（当前挂在 `App_Task_1ms`）。  
 - 若修改 `App_Task_1ms` 的周期，`Beep` 计时会同比偏离，需同步改为基于 `HAL_GetTick` 差值的实现或在 1 ms 任务中继续调用 `Process()`。
+
+## 感为八路灰度（I²C，`gw_gray_sensor`）
+
+- 文件：`Firmware/Drivers/gw_gray_sensor.c`、`gw_gray_sensor.h`，寄存器宏见 **`gw_gray_regs.h`**（与 TI 工程中 `gw_grayscale_sensor.h` / `GraySensor` 约定一致）。
+- HAL：**`I2C1`**，`Core/Src/i2c.c` 中为 **PB6=SCL、PB7=SDA**、约 **100 kHz**。若底板走线不同，请在 CubeMX 改脚并合并生成代码与用户区 MSP。
+- 默认 **7 位地址 `0x4C`**（与原版左移一位写 `HAL_I2C_Mem_*`）。
+- 使用示例：
+
+```c
+#include "gw_gray_sensor.h"
+
+static GwGraySensor g_gray;
+
+void InitGray(void)
+{
+  GwGraySensor_InitDefaults(&g_gray, &hi2c1);
+  /* 可选：上电阻塞等待传感器应答，超时则不挂死 */
+  (void)GwGraySensor_InitPingWait(&g_gray, 300);
+}
+
+bool SampleGrayDigital(void)
+{
+  return GwGray_ReadDigitalUpdate(&g_gray);
+}
+/* 读后：g_gray.digital_raw / g_gray.digital_inv（inv 为按位取反，等同原 GraySensor_update） */
+```
+
+- 可调：`timeout_ms`、`addr_7bit`；也可用 `GwGray_ReadAnalog8`、`GwGray_ReadLineOffsetU16`（`raw[0] | raw[1]<<8`）等与 TI 原版对应。
 
 ## 调试串口 USART1
 
