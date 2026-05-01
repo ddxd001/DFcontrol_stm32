@@ -27,12 +27,31 @@ static void App_Task_10ms(void)
   static uint8_t s_beep_stage;
   static uint8_t s_pending_beeps;
   static uint32_t s_beep_deadline_ms;
+  static uint8_t s_start_guard_init;
+  static uint32_t s_start_guard_deadline_ms;
   uint8_t rx;
   uint32_t now_ms;
 
+  now_ms = HAL_GetTick();
   ButtonDrv_Process();
 
-  if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
+  if (s_start_guard_init == 0U) {
+    s_start_guard_init = 1U;
+    s_start_guard_deadline_ms = now_ms + 1200U;
+  }
+
+  if ((int32_t)(now_ms - s_start_guard_deadline_ms) < 0) {
+    /* 上电保护期：按键/UART1 全部忽略，清空事件与请求，防止误启动。 */
+    (void)ButtonDrv_WasPressed(BUTTON_DRV_PD3);
+    (void)ButtonDrv_WasPressed(BUTTON_DRV_PD4);
+    (void)ButtonDrv_WasPressed(BUTTON_DRV_PD5);
+    while (DebugUart_RxAvail() > 0U) {
+      (void)DebugUart_ReadByte(&rx);
+    }
+    s_q1_start_req = 0U;
+    s_q2_case1_start_req = 0U;
+    s_q2_case2_start_req = 0U;
+  } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
     s_q1_start_req = 1U;
     (void)DebugUart_Send((const uint8_t *)"Q1 start by PD3\r\n", 17U, 100U);
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
@@ -50,7 +69,6 @@ static void App_Task_10ms(void)
     s_beep_deadline_ms = 0U;
   }
 
-  now_ms = HAL_GetTick();
   if (s_beep_stage == 1U && (int32_t)(now_ms - s_beep_deadline_ms) >= 0) {
     if (s_beep_remain > 0U) {
       BuzzerDrv_Beep(80U);
@@ -71,19 +89,19 @@ static void App_Task_10ms(void)
       break;
     }
 
-    if (rx == 0x08U) {
+    if (rx == 0x08U || rx == (uint8_t)'8') {
       static const uint8_t ack_q1[] = "ACK 0x08 -> Q1\r\n";
       s_q1_start_req = 1U;
       (void)DebugUart_Send(ack_q1, (uint16_t)(sizeof(ack_q1) - 1U), 100U);
       continue;
     }
-    if (rx == 0x00U) {
+    if (rx == 0x00U || rx == (uint8_t)'0') {
       static const uint8_t ack_q21[] = "ACK 0x00 -> Q2-1\r\n";
       s_q2_case1_start_req = 1U;
       (void)DebugUart_Send(ack_q21, (uint16_t)(sizeof(ack_q21) - 1U), 100U);
       continue;
     }
-    if (rx == 0x01U) {
+    if (rx == 0x01U || rx == (uint8_t)'1') {
       static const uint8_t ack_q22[] = "ACK 0x01 -> Q2-2\r\n";
       s_q2_case2_start_req = 1U;
       (void)DebugUart_Send(ack_q22, (uint16_t)(sizeof(ack_q22) - 1U), 100U);
@@ -102,11 +120,14 @@ static void App_Task_50ms(void)
 static void App_Task_100ms(void)
 {
 #if FW_Q1_ENABLE != 0
+  static uint8_t s_boot_guard_init;
+  static uint32_t s_boot_guard_deadline_ms;
   static uint8_t s_mode; /* 1=Q1, 2=Q2-1, 3=Q2-2 */
   static uint8_t s_state;
   static uint8_t s_wait_ticks;
   static uint8_t s_round;
   static uint8_t s_ret_seg;
+  uint32_t now_ms;
   HAL_StatusTypeDef st;
 
   const int32_t pre_move_y_m21739 = 1739; /* 0.08m * 21739 */
@@ -122,6 +143,24 @@ static void App_Task_100ms(void)
   const int16_t rot_vmax = 1500;        /* 15 deg/s * 100 */
 
   if (ChassisUartBridge_IsPassthrough()) {
+    return;
+  }
+
+  now_ms = HAL_GetTick();
+  if (s_boot_guard_init == 0U) {
+    s_boot_guard_init = 1U;
+    s_boot_guard_deadline_ms = now_ms + 1200U;
+  }
+  if ((int32_t)(now_ms - s_boot_guard_deadline_ms) < 0) {
+    /* 100ms 状态机兜底：保护期内强制空闲，防止任何早期误触发落到 UART5。 */
+    s_q1_start_req = 0U;
+    s_q2_case1_start_req = 0U;
+    s_q2_case2_start_req = 0U;
+    s_mode = 0U;
+    s_state = 0U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
     return;
   }
 
