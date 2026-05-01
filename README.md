@@ -1,0 +1,90 @@
+# DFcontrol_stm32 — 固件代码框架说明
+
+基于 **STM32F407VETx**、**STM32CubeMX** 生成外设初始化，在 Keil MDK-ARM 下编译。本仓库在 Cube 生成代码之外，增加一层 **裸机周期调度 + 分层目录**，便于后续接入灰度传感器、DFLink 底盘、步进串口等驱动。
+
+---
+
+## 目录结构
+
+| 路径 | 说明 |
+|------|------|
+| `Core/` | CubeMX 生成：`main.c`、`gpio.c`、`usart.c`、中断与 HAL 配置。**业务逻辑尽量勿堆在这里**，仅在 `USER CODE BEGIN/END` 内接线。 |
+| `MDK-ARM/` | Keil 工程 `DFcontrol_stm32.uvprojx`、启动文件。新增源码需在工程中包含对应分组与 Include Path（已包含 `Firmware` 相关路径）。 |
+| `Firmware/Config/` | 工程级可调参数，如 `fw_config.h`（调度器最大任务数等）。 |
+| `Firmware/System/` | 系统能力：`scheduler`（周期任务）、`fw_fault`（故障码占位）。 |
+| `Firmware/BSP/` | 板级初始化钩子：`Bsp_Init()` 在 `MX_*` 之后调用，适合放“与具体引脚相关、但尚不属于某一设备”的收尾。 |
+| `Firmware/App/` | 应用入口 `App_Init()`、`App_StartScheduling()`，以及 `app_tasks.c` 中**周期任务注册与实现**。 |
+| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
+| `DFcontrol_stm32.ioc` | CubeMX 工程；改时钟/引脚/外设后重新生成代码，注意保留 `main.c` 中 USER 区修改。 |
+
+---
+
+## 程序启动顺序
+
+1. `HAL_Init()` → `SystemClock_Config()`  
+2. `MX_GPIO_Init()`、`MX_UART4_Init()`、`MX_USART1_UART_Init()`（以外设实际配置为准）  
+3. **`App_Init()`**：`Fault_Init()`、`Bsp_Init()`（内部可再调各驱动的 `*_Init()`）  
+4. **`App_StartScheduling()`**：`Scheduler_Init()` + `App_RegisterTasks()`  
+5. 主循环：**`Scheduler_RunPending()`**（按节拍调用已到期的周期任务）
+
+与框架相关的接线写在 `Core/Src/main.c` 的 `USER CODE` 区间内，Cube 重新生成时通常可保留。
+
+---
+
+## 调度器约定
+
+- 时间基准：**`HAL_GetTick()`**，分辨率为 **1 ms**。  
+- API：`Firmware/System/scheduler.h`  
+  - `Scheduler_Init()`  
+  - `Scheduler_AddTask(函数指针, period_ms)`，返回 `-1` 表示任务槽满（上限见 `Firmware/Config/fw_config.h` 中 `FW_SCHED_MAX_TASKS`）  
+  - `Scheduler_RunPending()` 在主循环中**反复调用**。  
+- 同一时刻多个任务到期时，按**添加顺序**依次执行；耗时任务应尽量拆短或降频，避免拖慢后继任务。  
+- 需要 **strict 固定相位**的控制环可考虑后续增加硬件定时中断 + 标志位，再在读标志的任务里运算。
+
+默认在 `App_RegisterTasks()` 中注册了 `1 ms / 10 ms / 50 ms / 100 ms` 四档钩子；按需在里面填协议轮询、传感器读取、PID 等。
+
+---
+
+## 蜂鸣器驱动（示例）
+
+- 文件：`Firmware/Drivers/buzzer_drv.c`，**PA11 高电平有效**（Cube 中已配置为输出）。  
+- **非阻塞**定长：`BuzzerDrv_Beep(ms)` 依赖 **`BuzzerDrv_Process()` 在约 1 ms 周期被调用**（当前挂在 `App_Task_1ms`）。  
+- 若修改 `App_Task_1ms` 的周期，`Beep` 计时会同比偏离，需同步改为基于 `HAL_GetTick` 差值的实现或在 1 ms 任务中继续调用 `Process()`。
+
+仓库中 **`App_Task_BeepSelftest_1Hz`** 为开发用自检（约每 1 s 短鸣，共 5 次），产品化前请删除该任务及对应 `Scheduler_AddTask` 行。
+
+---
+
+## 如何扩展
+
+### 新增周期任务
+
+在 `app_tasks.c` 中增加 `static void App_Task_Xxx(void)`，在 `App_RegisterTasks()` 里 `Scheduler_AddTask(App_Task_Xxx, 周期_ms)`。
+
+### 新增设备驱动
+
+1. 在 `Firmware/Drivers/` 增加 `xxx_drv.c` / `xxx_drv.h`。  
+2. 在 **Keil** 的 `Firmware` 组中加入 `.c` 文件。  
+3. 确认 **C/C++ Include Path** 含 `../Firmware/Drivers`（工程已配）。  
+4. 在 **`Bsp_Init()`** 或 **`App_Init()`** 中调用驱动的 `Xxx_Init()`（依依赖顺序而定）。  
+5. 在合适周期的任务中调用 `Xxx_Process()` / 读采样 API。
+
+### CubeMX 侧建议（按需）
+
+- 八路灰度：**I2C** + 上拉与速率与线长相匹配。  
+- 底盘 DFLink / 步进：通常各占用一条 **UART**（与当前 UART4/USART1 分配一致即可）。  
+- 时钟：若板载 **HSE**，建议在 Cube 中统一为 PLL 源，避免长期 HSI 带来串口波特率误差。
+
+---
+
+## 编译与烧录
+
+- 使用 **Keil uVision5** 打开 `MDK-ARM/DFcontrol_stm32.uvprojx`，目标芯片 **STM32F407VETx**。  
+- HAL 路径当前指向本机 STM32Cube 仓库；**换电脑后**需在工程选项中修正 `Drivers` 的绝对路径，或将 HAL 拷入工程并改相对路径。
+
+---
+
+## 版本与维护
+
+- 框架由项目维护者演进；与 ST 官方生成代码的边界以 **`USER CODE BEGIN/END`** 为准。  
+- 协议与设备细节（如 DFLink）见对应文档，本 README 仅描述**代码组织与运行模型**。

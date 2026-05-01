@@ -1,0 +1,11 @@
+# Keil µVision output
+MDK-ARM/DFcontrol_stm32/
+MDK-ARM/*.bak
+*.uvgui.*
+*.uvguix.*
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
