@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "dflink_uart5.h"
 #include "fw_config.h"
 #include "stm32f407xx.h"
 #include "usart.h"
@@ -173,6 +174,11 @@ uint32_t DebugUart_ReadBytes(uint8_t *buf, uint32_t maxlen)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
+  if (huart == &huart5) {
+    DflinkUart5_HAL_RxCpltCallback(huart);
+    return;
+  }
+
   if (s_uart == 0 || huart != s_uart) {
     return;
   }
@@ -183,6 +189,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
+  if (huart == &huart5) {
+    DflinkUart5_HAL_ErrorCallback(huart);
+    return;
+  }
+
   if (s_uart == 0 || huart != s_uart) {
     return;
   }

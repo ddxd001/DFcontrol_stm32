@@ -466,6 +466,21 @@
               <FilePath>../Firmware/Drivers/gw_gray_sensor.c</FilePath>
             </File>
             <File>
+              <FileName>dflink_uart5.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Firmware/Drivers/dflink_uart5.c</FilePath>
+            </File>
+            <File>
+              <FileName>dflink_chassis_motion.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Firmware/Drivers/dflink_chassis_motion.c</FilePath>
+            </File>
+            <File>
+              <FileName>chassis_uart_bridge.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Firmware/Drivers/chassis_uart_bridge.c</FilePath>
+            </File>
+            <File>
               <FileName>debug_uart.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Firmware/Drivers/debug_uart.c</FilePath>

@@ -207,4 +207,10 @@ void USART1_IRQHandler(void)
   HAL_UART_IRQHandler(&huart1);
 }
 
+/** @brief UART5 底盘串口中断 → HAL dispatcher */
+void UART5_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart5);
+}
+
 /* USER CODE END 1 */
