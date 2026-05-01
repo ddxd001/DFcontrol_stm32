@@ -1,6 +1,8 @@
 #include "app_tasks.h"
 #include "scheduler.h"
+
 #include "buzzer_drv.h"
+#include "debug_uart.h"
 
 static void App_Task_1ms(void)
 {
@@ -9,6 +11,12 @@ static void App_Task_1ms(void)
 
 static void App_Task_10ms(void)
 {
+  while (DebugUart_RxAvail() > 0U) {
+    uint32_t n = DebugUart_EchoRxToTx(160U, 200U);
+    if (n == 0U) {
+      break;
+    }
+  }
 }
 
 static void App_Task_50ms(void)

@@ -455,6 +455,11 @@
               <FileType>1</FileType>
               <FilePath>../Firmware/Drivers/buzzer_drv.c</FilePath>
             </File>
+            <File>
+              <FileName>debug_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Firmware/Drivers/debug_uart.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

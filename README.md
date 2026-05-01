@@ -14,7 +14,7 @@
 | `Firmware/System/` | 系统能力：`scheduler`（周期任务）、`fw_fault`（故障码占位）。 |
 | `Firmware/BSP/` | 板级初始化钩子：`Bsp_Init()` 在 `MX_*` 之后调用，适合放“与具体引脚相关、但尚不属于某一设备”的收尾。 |
 | `Firmware/App/` | 应用入口 `App_Init()`、`App_StartScheduling()`，以及 `app_tasks.c` 中**周期任务注册与实现**。 |
-| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
+| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`、`debug_uart`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
 | `DFcontrol_stm32.ioc` | CubeMX 工程；改时钟/引脚/外设后重新生成代码，注意保留 `main.c` 中 USER 区修改。 |
 
 ---
@@ -51,7 +51,17 @@
 - **非阻塞**定长：`BuzzerDrv_Beep(ms)` 依赖 **`BuzzerDrv_Process()` 在约 1 ms 周期被调用**（当前挂在 `App_Task_1ms`）。  
 - 若修改 `App_Task_1ms` 的周期，`Beep` 计时会同比偏离，需同步改为基于 `HAL_GetTick` 差值的实现或在 1 ms 任务中继续调用 `Process()`。
 
-仓库中 **`App_Task_BeepSelftest_1Hz`** 为开发用自检（约每 1 s 短鸣，共 5 次），产品化前请删除该任务及对应 `Scheduler_AddTask` 行。
+## 调试串口 USART1
+
+- 文件：`Firmware/Drivers/debug_uart.c`、`debug_uart.h`。  
+- **`Bsp_Init()`** 中会调用 **`DebugUart_Init()`**（须在 **`MX_USART1_UART_Init()`** 之后；当前 **`main`** 顺序已满足）。  
+- 硬件：**PA9 TX、PA10 RX**，默认波特率 **`usart.c` 中为 115200 8N1**（可按需在 CubeMX 修改）。  
+- **发送**：`DebugUart_Send(buf, len, tout_ms)`，内部为 **`HAL_UART_Transmit`**（阻塞）。  
+- **接收**：USART1 **`RXNE` 中断** + **512 字节环缓**；读取 **`DebugUart_RxAvail()`** / **`DebugUart_ReadByte`** / **`DebugUart_ReadBytes`**。缓冲区满时会丢弃新字节（避免覆盖未读数据）。  
+- **开机信息**：`**Bsp_Init()`** 在 **`DebugUart_Init()`** 后调用 **`DebugUart_PrintDeviceInfo()`**（固件名、MCU、SYSCLK、波特率、`Rx echo` 提示）。  
+- **原样回显**：`**App_Task_10ms`** 中循环调用 **`DebugUart_EchoRxToTx`**（最大 160 字节/轮，整块原样 **`DebugUart_Send`**）。  
+- **`Core/Src/stm32f4xx_it.c`**（`USER CODE`）已实现 **`USART1_IRQHandler`** → **`HAL_UART_IRQHandler(&huart1)`**。  
+- **`HAL_UART_RxCpltCallback`** 仅此模块使用；若在别处增加其它 UART 的 IT 收发，必须把各实例的分支合并到**同一个**回调中。
 
 ---
 
