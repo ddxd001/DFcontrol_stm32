@@ -9,6 +9,10 @@
 #define DFLINK_VEL_DISP_TYPE_A 0x02U
 #define DFLINK_VEL_DISP_TYPE_B 0x64U
 #define DFLINK_VEL_DISP_C_LEN  14U
+/* AdaptConstPMove: A=0x02, B=0x65, LEN=14 */
+#define DFLINK_ADAPT_MOVE_TYPE_A 0x02U
+#define DFLINK_ADAPT_MOVE_TYPE_B 0x65U
+#define DFLINK_ADAPT_MOVE_C_LEN  14U
 /* sendrot: A=0x02, B=0x66, LEN=10 */
 #define DFLINK_ROT_TYPE_A      0x02U
 #define DFLINK_ROT_TYPE_B      0x66U
@@ -32,6 +36,22 @@ HAL_StatusTypeDef DflinkChassis_SendVelDisplacement(int32_t vx_m_times21739,
 
 /** 位移米 ×21739 换算：支持整数米（可自行扩展带小数版本） */
 #define DFLINK_MOVE_M_AS_UNIT21739(m_int) ((int32_t)(m_int) * 21739)
+
+/**
+ * 自适应位移 AdaptConstPMove（A=0x02, B=0x65, LEN=14）
+ * payload:
+ *  - Px: S32 LE, m * 21739
+ *  - Py: S32 LE, m * 21739
+ *  - Pz: S32 LE, m * 21739
+ *  - Speed: S16 LE, m/s * 100
+ */
+HAL_StatusTypeDef DflinkChassis_SendAdaptConstPMove(int32_t px_m_times21739,
+                                                    int32_t py_m_times21739,
+                                                    int32_t pz_m_times21739,
+                                                    int16_t speed_mps_times100,
+                                                    uint32_t tout_ms);
+
+#define DFLINK_MOVE_M_AS_UNIT21739_FOR_ADAPT(m_int) ((int32_t)(m_int) * 21739)
 
 /**
  * 旋转 sendrot（数据位 C 共 10 字节）

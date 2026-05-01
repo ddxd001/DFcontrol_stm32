@@ -22,6 +22,12 @@ static void Dflink_PackI16Le(uint8_t *p2, int16_t v)
   p2[1] = (uint8_t)((u >> 8) & 0xFFU);
 }
 
+static void Dflink_PackU16Le(uint8_t *p2, uint16_t v)
+{
+  p2[0] = (uint8_t)(v & 0xFFU);
+  p2[1] = (uint8_t)((v >> 8) & 0xFFU);
+}
+
 HAL_StatusTypeDef DflinkChassis_SendVelDisplacement(int32_t vx_m_times21739,
                                                     int32_t vy_m_times21739,
                                                     int32_t vz_m_times21739,
@@ -54,4 +60,21 @@ HAL_StatusTypeDef DflinkChassis_SendRotation(int16_t rx_deg_times100,
 
   return DflinkUart5_SendFrame(DFLINK_ROT_TYPE_A, DFLINK_ROT_TYPE_B, c,
                                DFLINK_ROT_C_LEN, tout_ms);
+}
+
+HAL_StatusTypeDef DflinkChassis_SendAdaptConstPMove(int32_t px_m_times21739,
+                                                    int32_t py_m_times21739,
+                                                    int32_t pz_m_times21739,
+                                                    int16_t speed_mps_times100,
+                                                    uint32_t tout_ms)
+{
+  uint8_t c[DFLINK_ADAPT_MOVE_C_LEN];
+
+  Dflink_PackI32Le(&c[0], px_m_times21739);
+  Dflink_PackI32Le(&c[4], py_m_times21739);
+  Dflink_PackI32Le(&c[8], pz_m_times21739);
+  Dflink_PackU16Le(&c[12], (uint16_t)speed_mps_times100);
+
+  return DflinkUart5_SendFrame(DFLINK_ADAPT_MOVE_TYPE_A, DFLINK_ADAPT_MOVE_TYPE_B, c,
+                               DFLINK_ADAPT_MOVE_C_LEN, tout_ms);
 }

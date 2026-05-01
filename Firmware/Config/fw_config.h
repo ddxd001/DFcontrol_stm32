@@ -11,4 +11,9 @@
 #endif
 #define FW_CHASSIS_BRIDGE_TX_TIMEOUT_MS   100U
 
+/* 题目第一问：左转90度 -> 直走1m，循环4次 */
+#ifndef FW_Q1_ENABLE
+#define FW_Q1_ENABLE  1
+#endif
+
 #endif
