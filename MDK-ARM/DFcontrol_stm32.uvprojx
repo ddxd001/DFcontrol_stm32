@@ -461,6 +461,11 @@
               <FilePath>../Firmware/Drivers/buzzer_drv.c</FilePath>
             </File>
             <File>
+              <FileName>button_drv.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Firmware/Drivers/button_drv.c</FilePath>
+            </File>
+            <File>
               <FileName>gw_gray_sensor.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Firmware/Drivers/gw_gray_sensor.c</FilePath>
