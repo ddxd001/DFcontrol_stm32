@@ -2,6 +2,7 @@
 
 #include "dflink_uart5.h"
 
+/* 将有符号 32 位按 DFLink 约定打包为小端字节序。 */
 static void Dflink_PackI32Le(uint8_t *p4, int32_t v)
 {
   uint32_t u;
@@ -13,6 +14,7 @@ static void Dflink_PackI32Le(uint8_t *p4, int32_t v)
   p4[3] = (uint8_t)((u >> 24) & 0xFFU);
 }
 
+/* 将有符号 16 位按小端打包。 */
 static void Dflink_PackI16Le(uint8_t *p2, int16_t v)
 {
   uint16_t u;
@@ -22,6 +24,7 @@ static void Dflink_PackI16Le(uint8_t *p2, int16_t v)
   p2[1] = (uint8_t)((u >> 8) & 0xFFU);
 }
 
+/* 将无符号 16 位按小端打包（用于自适应位移速度字段）。 */
 static void Dflink_PackU16Le(uint8_t *p2, uint16_t v)
 {
   p2[0] = (uint8_t)(v & 0xFFU);
@@ -36,6 +39,7 @@ HAL_StatusTypeDef DflinkChassis_SendVelDisplacement(int32_t vx_m_times21739,
 {
   uint8_t c[DFLINK_VEL_DISP_C_LEN];
 
+  /* C 负载布局: [0..3]Vx [4..7]Vy [8..11]Vz [12..13]r_max (LE)。 */
   Dflink_PackI32Le(&c[0], vx_m_times21739);
   Dflink_PackI32Le(&c[4], vy_m_times21739);
   Dflink_PackI32Le(&c[8], vz_m_times21739);
@@ -53,6 +57,7 @@ HAL_StatusTypeDef DflinkChassis_SendRotation(int16_t rx_deg_times100,
 {
   uint8_t c[DFLINK_ROT_C_LEN];
 
+  /* C 负载布局: [0..1]Rx [2..3]Ry [4..7]Rz [8..9]r_max (LE)。 */
   Dflink_PackI16Le(&c[0], rx_deg_times100);
   Dflink_PackI16Le(&c[2], ry_deg_times100);
   Dflink_PackI32Le(&c[4], rz_deg_times10000);
@@ -70,6 +75,7 @@ HAL_StatusTypeDef DflinkChassis_SendAdaptConstPMove(int32_t px_m_times21739,
 {
   uint8_t c[DFLINK_ADAPT_MOVE_C_LEN];
 
+  /* C 负载布局: [0..3]Px [4..7]Py [8..11]Pz [12..13]Speed (LE)。 */
   Dflink_PackI32Le(&c[0], px_m_times21739);
   Dflink_PackI32Le(&c[4], py_m_times21739);
   Dflink_PackI32Le(&c[8], pz_m_times21739);

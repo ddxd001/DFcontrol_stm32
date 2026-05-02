@@ -3,6 +3,18 @@
  */
 #include "gw_gray_sensor.h"
 
+static uint8_t gw_popcount8(uint8_t v)
+{
+  uint8_t c;
+
+  c = 0U;
+  while (v != 0U) {
+    v = (uint8_t)(v & (uint8_t)(v - 1U));
+    c++;
+  }
+  return c;
+}
+
 static uint16_t gw_i2c_addr8(GwGraySensor *s)
 {
   return (uint16_t)(((uint16_t)s->addr_7bit) << 1);
@@ -145,4 +157,26 @@ bool GwGray_MemWriteByte(GwGraySensor *s, uint8_t reg, uint8_t val)
 bool GwGray_ChannelEnableMask(GwGraySensor *s, uint8_t mask)
 {
   return GwGray_MemWriteByte(s, GW_GRAY_ANALOG_CHANNEL_ENABLE, mask);
+}
+
+bool GwGray_IsCrossByDigitalInv(uint8_t digital_inv, uint8_t min_active_bits)
+{
+  uint8_t active_bits;
+
+  active_bits = gw_popcount8(digital_inv);
+  /* 现场特性：普通路段通常 1~2 黑点，十字时会超过 2 黑点。 */
+  return (bool)(active_bits >= min_active_bits);
+}
+
+bool GwGray_ReadAndDetectCross(GwGraySensor *s, uint8_t min_active_bits, bool *out_cross)
+{
+  if (out_cross == 0) {
+    return false;
+  }
+  if (!GwGray_ReadDigitalUpdate(s)) {
+    return false;
+  }
+
+  *out_cross = GwGray_IsCrossByDigitalInv(s->digital_inv, min_active_bits);
+  return true;
 }

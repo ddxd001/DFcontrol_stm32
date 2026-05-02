@@ -7,10 +7,33 @@
 #include "debug_uart.h"
 #include "dflink_chassis_motion.h"
 #include "fw_config.h"
+#include "gw_gray_sensor.h"
 
 static uint8_t s_q1_start_req;
 static uint8_t s_q2_case1_start_req;
 static uint8_t s_q2_case2_start_req;
+static uint8_t s_q3_case1_start_req;
+static uint8_t s_q3_case2_start_req;
+static uint8_t s_q4_start_req;
+static GwGraySensor s_gray_sensor;
+static uint8_t s_gray_sensor_inited;
+static uint8_t s_q3_case1_cross_detect_active;
+static uint8_t s_q3_case1_cross_count;
+static uint8_t s_q3_case1_cross_latched;
+
+static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_ticks,
+                                   uint8_t *round, uint8_t *ret_seg)
+{
+  BuzzerDrv_Beep(80U);
+  s_q3_case1_cross_detect_active = 0U;
+  s_q3_case1_cross_count = 0U;
+  s_q3_case1_cross_latched = 0U;
+  *mode = 0U;
+  *state = 0U;
+  *wait_ticks = 0U;
+  *round = 0U;
+  *ret_seg = 0U;
+}
 
 static void App_Task_1ms(void)
 {
@@ -48,6 +71,9 @@ static void App_Task_10ms(void)
     s_q1_start_req = 0U;
     s_q2_case1_start_req = 0U;
     s_q2_case2_start_req = 0U;
+    s_q3_case1_start_req = 0U;
+    s_q3_case2_start_req = 0U;
+    s_q4_start_req = 0U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
     s_q1_start_req = 1U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
@@ -101,6 +127,12 @@ static void App_Task_10ms(void)
           s_q2_case1_start_req = 1U;
         } else if (rx == 0x04U) {
           s_q2_case2_start_req = 1U;
+        } else if (rx == 0x05U) {
+          s_q3_case1_start_req = 1U;
+        } else if (rx == 0x06U) {
+          s_q3_case2_start_req = 1U;
+        } else if (rx == 0x07U) {
+          s_q4_start_req = 1U;
         }
         s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
       }
@@ -118,7 +150,7 @@ static void App_Task_100ms(void)
 #if FW_Q1_ENABLE != 0
   static uint8_t s_boot_guard_init;
   static uint32_t s_boot_guard_deadline_ms;
-  static uint8_t s_mode; /* 1=Q1, 2=Q2-1, 3=Q2-2 */
+  static uint8_t s_mode; /* 1=Q1, 2=Q2-1, 3=Q2-2, 4=Q3-1, 5=Q3-2, 6=Q4 */
   static uint8_t s_state;
   static uint8_t s_wait_ticks;
   static uint8_t s_round;
@@ -129,14 +161,22 @@ static void App_Task_100ms(void)
   const int32_t pre_move_y_m21739 = 1739; /* 0.08m * 21739 */
   const int32_t move_px_m21739 = 0;
   const int32_t move_py_m21739 = 21739; /* 1.0m * 21739 */
+  const int32_t move_py_half_m21739 = 10870; /* 0.5m * 21739 */
+  const int32_t move_py_q4_first_m21739 = 11957; /* 0.55m * 21739 */
+  const int32_t move_py_q4_second_m21739 = 9783; /* 0.45m * 21739 */
   const int32_t move_py_ret_last_m21739 = 19565; /* 0.9m * 21739 */
   const int32_t move_py_q1_last_m21739 = 20000; /* 0.92m * 21739 */
   const int32_t move_pz_m21739 = 0;
   const int16_t move_speed_mps100 = 3000; /* 30 m/s * 100 */
+  const int16_t move_speed_q3_case1_uniform_mps100 = 1000; /* 10 m/s * 100 */
+  const int16_t move_speed_q3_case2_uniform_mps100 = 1000; /* 10 m/s * 100 */
   const int32_t rot_left_90 = -900000;  /* -90deg * 10000 */
   const int32_t rot_right_90 = 900000;  /* +90deg * 10000 */
   const int32_t rot_u_turn = -1800000;  /* -180deg * 10000 */
   const int16_t rot_vmax = 1500;        /* 15 deg/s * 100 */
+  const uint8_t wait_ticks_default = 14U;          /* 1.4s */
+  const uint8_t wait_ticks_q3_case1_uniform = 28U; /* 2.8s */
+  const uint8_t gray_cross_min_active_bits = 3U;
 
   now_ms = HAL_GetTick();
   if (s_boot_guard_init == 0U) {
@@ -148,6 +188,9 @@ static void App_Task_100ms(void)
     s_q1_start_req = 0U;
     s_q2_case1_start_req = 0U;
     s_q2_case2_start_req = 0U;
+    s_q3_case1_start_req = 0U;
+    s_q3_case2_start_req = 0U;
+    s_q4_start_req = 0U;
     s_mode = 0U;
     s_state = 0U;
     s_wait_ticks = 0U;
@@ -158,6 +201,10 @@ static void App_Task_100ms(void)
 
   if (s_q1_start_req != 0U) {
     s_q1_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
     s_mode = 1U;
     s_state = 1U;
     s_wait_ticks = 0U;
@@ -165,6 +212,10 @@ static void App_Task_100ms(void)
     s_ret_seg = 0U;
   } else if (s_q2_case1_start_req != 0U) {
     s_q2_case1_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
     s_mode = 2U;
     s_state = 1U;
     s_wait_ticks = 0U;
@@ -172,7 +223,44 @@ static void App_Task_100ms(void)
     s_ret_seg = 0U;
   } else if (s_q2_case2_start_req != 0U) {
     s_q2_case2_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
     s_mode = 3U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q3_case1_start_req != 0U) {
+    s_q3_case1_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_mode = 4U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q3_case2_start_req != 0U) {
+    s_q3_case2_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_mode = 5U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q4_start_req != 0U) {
+    s_q4_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_mode = 6U;
     s_state = 1U;
     s_wait_ticks = 0U;
     s_round = 0U;
@@ -183,7 +271,27 @@ static void App_Task_100ms(void)
     case 0U: /* 等待 PD3(Q1) / PD4(Q2-1) / PD5(Q2-2) */
       return;
 
-    case 1U: /* 启动后先前进 0.08m */
+    case 1U: /* 启动动作：Q3-2 匀速前进1m，其余先前进0.08m */
+      if (s_mode == 5U) {
+        st = DflinkChassis_SendVelDisplacement(
+            move_px_m21739, move_py_m21739, move_pz_m21739,
+            move_speed_q3_case2_uniform_mps100, 200U);
+        if (st != HAL_OK) {
+          return;
+        }
+        s_wait_ticks = 0U;
+        s_state = 15U;
+        break;
+      } else if (s_mode == 6U) {
+        st = DflinkChassis_SendAdaptConstPMove(0, pre_move_y_m21739, 0,
+                                               move_speed_mps100, 200U);
+        if (st != HAL_OK) {
+          return;
+        }
+        s_wait_ticks = 0U;
+        s_state = 16U;
+        break;
+      }
       st = DflinkChassis_SendAdaptConstPMove(0, pre_move_y_m21739, 0,
                                              move_speed_mps100, 200U);
       if (st != HAL_OK) {
@@ -201,7 +309,7 @@ static void App_Task_100ms(void)
       s_state = 3U;
       break;
 
-    case 3U: /* Q1/Q2-1左转90；Q2-2右转90 */
+    case 3U: /* Q1/Q2-1/Q3-1左转90；Q2-2右转90 */
       st = DflinkChassis_SendRotation(
           0, 0, (s_mode == 3U) ? rot_right_90 : rot_left_90, rot_vmax, 200U);
       if (st != HAL_OK) {
@@ -219,11 +327,24 @@ static void App_Task_100ms(void)
       s_state = 5U;
       break;
 
-    case 5U: /* 直走: Q1最后一段0.92m，Q2固定1m */
-      st = DflinkChassis_SendAdaptConstPMove(
-          move_px_m21739,
-          (s_mode == 1U && s_round >= 3U) ? move_py_q1_last_m21739 : move_py_m21739,
-          move_pz_m21739, move_speed_mps100, 200U);
+    case 5U: /* 直走: Q3-1 第2段改为匀速移动(速度10)，其余保持原策略 */
+      if (s_mode == 4U && s_round == 1U) {
+        s_q3_case1_cross_detect_active = 1U;
+        s_q3_case1_cross_count = 0U;
+        s_q3_case1_cross_latched = 0U;
+        st = DflinkChassis_SendVelDisplacement(move_px_m21739, move_py_m21739,
+                                               move_pz_m21739,
+                                               move_speed_q3_case1_uniform_mps100, 200U);
+      } else {
+        s_q3_case1_cross_detect_active = 0U;
+        s_q3_case1_cross_count = 0U;
+        s_q3_case1_cross_latched = 0U;
+        st = DflinkChassis_SendAdaptConstPMove(
+            move_px_m21739,
+            ((s_mode == 1U || s_mode == 4U) && s_round >= 3U) ? move_py_q1_last_m21739
+                                                               : move_py_m21739,
+            move_pz_m21739, move_speed_mps100, 200U);
+      }
       if (st != HAL_OK) {
         return;
       }
@@ -231,14 +352,31 @@ static void App_Task_100ms(void)
       s_state = 6U;
       break;
 
-    case 6U: /* 行进稳定等待约 1.2s */
-      if (s_wait_ticks++ < 12U) {
+    case 6U: /* 行进稳定等待：默认1.4s，Q3-1第2段匀速后延长到2.5s */
+      if (s_q3_case1_cross_detect_active != 0U &&
+          s_q3_case1_cross_count < 3U &&
+          s_gray_sensor_inited != 0U) {
+        bool is_cross;
+        if (GwGray_ReadAndDetectCross(&s_gray_sensor, gray_cross_min_active_bits, &is_cross) &&
+            is_cross != 0U) {
+          if (s_q3_case1_cross_latched == 0U) {
+            BuzzerDrv_Beep(80U);
+            s_q3_case1_cross_count++;
+            s_q3_case1_cross_latched = 1U;
+          }
+        } else {
+          s_q3_case1_cross_latched = 0U;
+        }
+      }
+      if (s_wait_ticks++ <
+          ((s_mode == 4U && s_round == 1U) ? wait_ticks_q3_case1_uniform
+                                           : wait_ticks_default)) {
         return;
       }
       s_wait_ticks = 0U;
       s_round++;
-      if (s_round >= ((s_mode == 1U) ? 4U : 3U)) {
-        if (s_mode == 1U) {
+      if (s_round >= ((s_mode == 1U || s_mode == 4U) ? 4U : 3U)) {
+        if (s_mode == 1U || s_mode == 4U) {
           s_state = 7U;
         } else if (s_mode == 2U) {
           s_ret_seg = 0U;
@@ -252,8 +390,12 @@ static void App_Task_100ms(void)
       }
       break;
 
-    case 7U: /* Q2 调头；Q1 已完成停机 */
-      if (s_mode < 2U || s_mode > 3U) {
+    case 7U: /* Q2 调头；Q1/Q3-1 已完成停机 */
+      if (s_mode == 1U || s_mode == 4U) {
+        App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+        return;
+      }
+      if (s_mode != 2U && s_mode != 3U) {
         return;
       }
       st = DflinkChassis_SendRotation(0, 0, rot_u_turn, rot_vmax, 200U);
@@ -264,8 +406,8 @@ static void App_Task_100ms(void)
       s_state = 8U;
       break;
 
-    case 8U: /* 调头稳定等待约 0.3s */
-      if (s_wait_ticks++ < 3U) {
+    case 8U: /* 调头稳定等待约 0.5s */
+      if (s_wait_ticks++ < 5U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -283,8 +425,8 @@ static void App_Task_100ms(void)
       s_state = 10U;
       break;
 
-    case 10U: /* 返程位移稳定等待约 1.2s */
-      if (s_wait_ticks++ < 12U) {
+    case 10U: /* 返程位移稳定等待约 1.4s */
+      if (s_wait_ticks++ < wait_ticks_default) {
         return;
       }
       s_wait_ticks = 0U;
@@ -315,7 +457,109 @@ static void App_Task_100ms(void)
       break;
 
     case 12U: /* Q2 完成（含原路返回） */
-      s_state = 13U;
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
+    case 15U: /* Q3-2 匀速前进1m后等待约1.2s结束 */
+      if (s_wait_ticks++ < 12U) {
+        return;
+      }
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
+    case 16U: /* Q4 前置前进稳定等待约 0.5s */
+      if (s_wait_ticks++ < 5U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 17U;
+      break;
+
+    case 17U: /* Q4 左转 90 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 18U;
+      break;
+
+    case 18U: /* Q4 转向稳定等待约 0.3s */
+      if (s_wait_ticks++ < 3U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 19U;
+      break;
+
+    case 19U: /* Q4 前进 0.55m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q4_first_m21739,
+                                             move_pz_m21739, move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 20U;
+      break;
+
+    case 20U: /* Q4 等待 4.0s */
+      if (s_wait_ticks++ < 40U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 21U;
+      break;
+
+    case 21U: /* Q4 再前进 0.45m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q4_second_m21739,
+                                             move_pz_m21739, move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 22U;
+      break;
+
+    case 22U: /* Q4 第二段 0.5m 稳定等待约 2.2s */
+      if (s_wait_ticks++ < 22U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 23U;
+      break;
+
+    case 23U: /* Q4 再左转 90 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 24U;
+      break;
+
+    case 24U: /* Q4 再次转向稳定等待约 0.3s */
+      if (s_wait_ticks++ < 3U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 25U;
+      break;
+
+    case 25U: /* Q4 最后前进 0.92m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q1_last_m21739,
+                                             move_pz_m21739, move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 26U;
+      break;
+
+    case 26U: /* Q4 最后一段稳定等待约 1.8s 后停车 */
+      if (s_wait_ticks++ < 18U) {
+        return;
+      }
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
     default:
@@ -327,6 +571,11 @@ static void App_Task_100ms(void)
 void App_RegisterTasks(void)
 {
   ButtonDrv_Init();
+  GwGraySensor_InitDefaults(&s_gray_sensor, &hi2c1);
+  s_gray_sensor_inited = GwGraySensor_InitPingWait(&s_gray_sensor, 300U) ? 1U : 0U;
+  s_q3_case1_cross_detect_active = 0U;
+  s_q3_case1_cross_count = 0U;
+  s_q3_case1_cross_latched = 0U;
 
   (void)Scheduler_AddTask(App_Task_1ms,   1U);
   (void)Scheduler_AddTask(App_Task_10ms, 10U);

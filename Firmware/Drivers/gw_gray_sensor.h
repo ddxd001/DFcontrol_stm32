@@ -41,4 +41,16 @@ bool GwGray_ReadLineOffsetU16(GwGraySensor *s, uint16_t *out);
 bool GwGray_MemWriteByte(GwGraySensor *s, uint8_t reg, uint8_t val);
 bool GwGray_ChannelEnableMask(GwGraySensor *s, uint8_t mask);
 
+/*
+ * 十字路口检测（基于 digital_inv 位图）：
+ * - digital_inv 的 bit=1 表示该路灰度检测到线；
+ * - 判定条件：左区(bit0~2)有线 + 中区(bit3~4)有线 + 右区(bit5~7)有线，
+ *   且总命中路数 >= min_active_bits。
+ * 推荐 min_active_bits=5（可按现场线宽调参）。
+ */
+bool GwGray_IsCrossByDigitalInv(uint8_t digital_inv, uint8_t min_active_bits);
+
+/* 先刷新 digital_raw/digital_inv，再执行十字检测。 */
+bool GwGray_ReadAndDetectCross(GwGraySensor *s, uint8_t min_active_bits, bool *out_cross);
+
 #endif
