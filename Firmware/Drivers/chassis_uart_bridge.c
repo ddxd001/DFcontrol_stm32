@@ -10,10 +10,8 @@
 
 static bool s_passthrough;
 
-/**
- * 透传不宜用 HAL_UART_Transmit：其 __HAL_LOCK 与同一 UART 上中断里
- * HAL_UART_Receive_IT 重启竞争可能导致收包链断裂。
- * 此处仅轮询 TXE/TC 写 DR，不碰 HAL 互斥锁。
+/*
+ * 透传不使用 HAL_UART_Transmit，避免与同口中断接收链路在锁竞争时互相影响。
  */
 static HAL_StatusTypeDef uart_poll_send(UART_HandleTypeDef *hu,
                                         const uint8_t *buf, uint16_t len,
@@ -48,15 +46,12 @@ static HAL_StatusTypeDef uart_poll_send(UART_HandleTypeDef *hu,
 static void bridge_sync_uart5_rx_listen(void)
 {
   if (!s_passthrough) {
-    /* 恢复环形缓冲中断收包，供 DFLink_SendFrame / ReadBytes */
     DflinkUart5_StartRx();
     return;
   }
 
   /*
-   * 透传时必须停掉 Receive_IT：
-   * 460800 + 周期任务若为 10ms 易 ORE，且环形缓冲链路易与 IRQ 交错丢字节。
-   * 随后在 Process 中对 UART5 RXNE 做轮询读出再转发 USART1。
+   * 透传时改为轮询 UART5 RXNE，避免与 DflinkUart5 的 Receive_IT 双读 DR。
    */
   DflinkUart5_StopRxIt();
 }
@@ -96,7 +91,7 @@ void ChassisUartBridge_Process(void)
 
   tout = (uint32_t)FW_CHASSIS_BRIDGE_TX_TIMEOUT_MS;
 
-  /* UART5：轮询硬件 RX → USART1（不经过 dflink 环缓） */
+  /* UART5 RX -> USART1 TX */
   for (k = 0U; k < UART5_RXNE_BURST_MAX_PER_TICK; k++) {
     if (__HAL_UART_GET_FLAG(&huart5, UART_FLAG_RXNE) == RESET) {
       break;
@@ -111,7 +106,7 @@ void ChassisUartBridge_Process(void)
     }
   }
 
-  /* USART1 环缓 → UART5 TX */
+  /* USART1 RX ring -> UART5 TX */
   n = DebugUart_ReadBytes(buf, CHASSIS_BRIDGE_CHUNK);
   if (n > 0U) {
     (void)uart_poll_send(&huart5, buf, (uint16_t)n, tout);

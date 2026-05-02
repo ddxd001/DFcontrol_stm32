@@ -15,7 +15,7 @@ static uint8_t s_q2_case2_start_req;
 static void App_Task_1ms(void)
 {
   BuzzerDrv_Process();
-  /* 460800 UART5：透传在 10ms 才跑易 ORE，改 1ms 轮询 DR */
+
   if (ChassisUartBridge_IsPassthrough()) {
     ChassisUartBridge_Process();
   }
@@ -26,10 +26,10 @@ static void App_Task_10ms(void)
   static uint8_t s_beep_remain;
   static uint8_t s_beep_stage;
   static uint8_t s_pending_beeps;
+  static uint8_t s_uart_seq_state;
   static uint32_t s_beep_deadline_ms;
   static uint8_t s_start_guard_init;
   static uint32_t s_start_guard_deadline_ms;
-  uint8_t rx;
   uint32_t now_ms;
 
   now_ms = HAL_GetTick();
@@ -41,25 +41,19 @@ static void App_Task_10ms(void)
   }
 
   if ((int32_t)(now_ms - s_start_guard_deadline_ms) < 0) {
-    /* 上电保护期：按键/UART1 全部忽略，清空事件与请求，防止误启动。 */
+    /* 上电保护期：按键事件与请求全部忽略，防止误启动。 */
     (void)ButtonDrv_WasPressed(BUTTON_DRV_PD3);
     (void)ButtonDrv_WasPressed(BUTTON_DRV_PD4);
     (void)ButtonDrv_WasPressed(BUTTON_DRV_PD5);
-    while (DebugUart_RxAvail() > 0U) {
-      (void)DebugUart_ReadByte(&rx);
-    }
     s_q1_start_req = 0U;
     s_q2_case1_start_req = 0U;
     s_q2_case2_start_req = 0U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
     s_q1_start_req = 1U;
-    (void)DebugUart_Send((const uint8_t *)"Q1 start by PD3\r\n", 17U, 100U);
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
     s_q2_case1_start_req = 1U;
-    (void)DebugUart_Send((const uint8_t *)"Q2-1 start by PD4\r\n", 19U, 100U);
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD5)) {
     s_q2_case2_start_req = 1U;
-    (void)DebugUart_Send((const uint8_t *)"Q2-2 start by PD5\r\n", 19U, 100U);
   }
 
   if (s_beep_stage == 0U && s_pending_beeps > 0U) {
@@ -84,33 +78,29 @@ static void App_Task_10ms(void)
     return;
   }
 
-  while (DebugUart_RxAvail() > 0U) {
-    if (!DebugUart_ReadByte(&rx)) {
-      break;
-    }
+  /* UART1 验证：收到什么就回显什么。 */
+  {
+    uint8_t rx;
+    while (DebugUart_ReadByte(&rx)) {
+      (void)DebugUart_Send(&rx, 1U, 50U);
 
-    if (rx == 0x08U || rx == (uint8_t)'8') {
-      static const uint8_t ack_q1[] = "ACK 0x08 -> Q1\r\n";
-      s_q1_start_req = 1U;
-      (void)DebugUart_Send(ack_q1, (uint16_t)(sizeof(ack_q1) - 1U), 100U);
-      continue;
+      if (s_uart_seq_state == 0U) {
+        s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
+      } else if (s_uart_seq_state == 1U) {
+        if (rx == 0xBBU) {
+          s_uart_seq_state = 2U;
+        } else {
+          s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
+        }
+      } else {
+        if (rx == 0x01U) {
+          BuzzerDrv_Beep(80U);
+        }
+        s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
+      }
     }
-    if (rx == 0x00U || rx == (uint8_t)'0') {
-      static const uint8_t ack_q21[] = "ACK 0x00 -> Q2-1\r\n";
-      s_q2_case1_start_req = 1U;
-      (void)DebugUart_Send(ack_q21, (uint16_t)(sizeof(ack_q21) - 1U), 100U);
-      continue;
-    }
-    if (rx == 0x01U || rx == (uint8_t)'1') {
-      static const uint8_t ack_q22[] = "ACK 0x01 -> Q2-2\r\n";
-      s_q2_case2_start_req = 1U;
-      (void)DebugUart_Send(ack_q22, (uint16_t)(sizeof(ack_q22) - 1U), 100U);
-      continue;
-    }
-
-    /* 对非控制字节保持单字节回显，便于串口调试 */
-    (void)DebugUart_Send(&rx, 1U, 50U);
   }
+
 }
 
 static void App_Task_50ms(void)
@@ -142,10 +132,6 @@ static void App_Task_100ms(void)
   const int32_t rot_u_turn = -1800000;  /* -180deg * 10000 */
   const int16_t rot_vmax = 1500;        /* 15 deg/s * 100 */
 
-  if (ChassisUartBridge_IsPassthrough()) {
-    return;
-  }
-
   now_ms = HAL_GetTick();
   if (s_boot_guard_init == 0U) {
     s_boot_guard_init = 1U;
@@ -171,7 +157,6 @@ static void App_Task_100ms(void)
     s_wait_ticks = 0U;
     s_round = 0U;
     s_ret_seg = 0U;
-    (void)DebugUart_Send((const uint8_t *)"Q1 restart\r\n", 12U, 100U);
   } else if (s_q2_case1_start_req != 0U) {
     s_q2_case1_start_req = 0U;
     s_mode = 2U;
@@ -179,7 +164,6 @@ static void App_Task_100ms(void)
     s_wait_ticks = 0U;
     s_round = 0U;
     s_ret_seg = 0U;
-    (void)DebugUart_Send((const uint8_t *)"Q2-1 restart\r\n", 14U, 100U);
   } else if (s_q2_case2_start_req != 0U) {
     s_q2_case2_start_req = 0U;
     s_mode = 3U;
@@ -187,7 +171,6 @@ static void App_Task_100ms(void)
     s_wait_ticks = 0U;
     s_round = 0U;
     s_ret_seg = 0U;
-    (void)DebugUart_Send((const uint8_t *)"Q2-2 restart\r\n", 14U, 100U);
   }
 
   switch (s_state) {
@@ -199,13 +182,6 @@ static void App_Task_100ms(void)
                                              move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
-      }
-      if (s_mode == 1U) {
-        (void)DebugUart_Send((const uint8_t *)"Q1 pre-move ok\r\n", 16U, 100U);
-      } else if (s_mode == 2U) {
-        (void)DebugUart_Send((const uint8_t *)"Q2-1 pre-move ok\r\n", 18U, 100U);
-      } else {
-        (void)DebugUart_Send((const uint8_t *)"Q2-2 pre-move ok\r\n", 18U, 100U);
       }
       s_wait_ticks = 0U;
       s_state = 2U;
@@ -224,13 +200,6 @@ static void App_Task_100ms(void)
           0, 0, (s_mode == 3U) ? rot_right_90 : rot_left_90, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
-      }
-      if (s_mode == 1U) {
-        (void)DebugUart_Send((const uint8_t *)"Q1 turn ok\r\n", 12U, 100U);
-      } else if (s_mode == 2U) {
-        (void)DebugUart_Send((const uint8_t *)"Q2-1 turn ok\r\n", 14U, 100U);
-      } else {
-        (void)DebugUart_Send((const uint8_t *)"Q2-2 turn ok\r\n", 14U, 100U);
       }
       s_wait_ticks = 0U;
       s_state = 4U;
@@ -252,13 +221,6 @@ static void App_Task_100ms(void)
       if (st != HAL_OK) {
         return;
       }
-      if (s_mode == 1U) {
-        (void)DebugUart_Send((const uint8_t *)"Q1 move ok\r\n", 12U, 100U);
-      } else if (s_mode == 2U) {
-        (void)DebugUart_Send((const uint8_t *)"Q2-1 move ok\r\n", 14U, 100U);
-      } else {
-        (void)DebugUart_Send((const uint8_t *)"Q2-2 move ok\r\n", 14U, 100U);
-      }
       s_wait_ticks = 0U;
       s_state = 6U;
       break;
@@ -271,14 +233,11 @@ static void App_Task_100ms(void)
       s_round++;
       if (s_round >= ((s_mode == 1U) ? 4U : 3U)) {
         if (s_mode == 1U) {
-          (void)DebugUart_Send((const uint8_t *)"Q1 done\r\n", 9U, 100U);
           s_state = 7U;
         } else if (s_mode == 2U) {
-          (void)DebugUart_Send((const uint8_t *)"Q2-1 outbound done\r\n", 20U, 100U);
           s_ret_seg = 0U;
           s_state = 7U;
         } else {
-          (void)DebugUart_Send((const uint8_t *)"Q2-2 outbound done\r\n", 20U, 100U);
           s_ret_seg = 0U;
           s_state = 7U;
         }
@@ -294,11 +253,6 @@ static void App_Task_100ms(void)
       st = DflinkChassis_SendRotation(0, 0, rot_u_turn, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
-      }
-      if (s_mode == 2U) {
-        (void)DebugUart_Send((const uint8_t *)"Q2-1 return uturn ok\r\n", 23U, 100U);
-      } else {
-        (void)DebugUart_Send((const uint8_t *)"Q2-2 return uturn ok\r\n", 23U, 100U);
       }
       s_wait_ticks = 0U;
       s_state = 8U;
@@ -318,19 +272,6 @@ static void App_Task_100ms(void)
           move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
-      }
-      if (s_ret_seg < 2U) {
-        if (s_mode == 2U) {
-          (void)DebugUart_Send((const uint8_t *)"Q2-1 return move 1m ok\r\n", 24U, 100U);
-        } else {
-          (void)DebugUart_Send((const uint8_t *)"Q2-2 return move 1m ok\r\n", 24U, 100U);
-        }
-      } else {
-        if (s_mode == 2U) {
-          (void)DebugUart_Send((const uint8_t *)"Q2-1 return move 0.9m ok\r\n", 25U, 100U);
-        } else {
-          (void)DebugUart_Send((const uint8_t *)"Q2-2 return move 0.9m ok\r\n", 25U, 100U);
-        }
       }
       s_wait_ticks = 0U;
       s_state = 10U;
@@ -354,11 +295,6 @@ static void App_Task_100ms(void)
       if (st != HAL_OK) {
         return;
       }
-      if (s_mode == 2U) {
-        (void)DebugUart_Send((const uint8_t *)"Q2-1 return turn ok\r\n", 21U, 100U);
-      } else {
-        (void)DebugUart_Send((const uint8_t *)"Q2-2 return turn ok\r\n", 21U, 100U);
-      }
       s_wait_ticks = 0U;
       s_state = 14U;
       break;
@@ -373,11 +309,6 @@ static void App_Task_100ms(void)
       break;
 
     case 12U: /* Q2 完成（含原路返回） */
-      if (s_mode == 2U) {
-        (void)DebugUart_Send((const uint8_t *)"Q2-1 done\r\n", 11U, 100U);
-      } else {
-        (void)DebugUart_Send((const uint8_t *)"Q2-2 done\r\n", 11U, 100U);
-      }
       s_state = 13U;
       break;
 

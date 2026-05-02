@@ -14,7 +14,7 @@
 | `Firmware/System/` | 系统能力：`scheduler`（周期任务）、`fw_fault`（故障码占位）。 |
 | `Firmware/BSP/` | 板级初始化钩子：`Bsp_Init()` 在 `MX_*` 之后调用，适合放“与具体引脚相关、但尚不属于某一设备”的收尾。 |
 | `Firmware/App/` | 应用入口 `App_Init()`、`App_StartScheduling()`，以及 `app_tasks.c` 中**周期任务注册与实现**。 |
-| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`、`debug_uart`、`gw_gray_sensor`、`dflink_uart5`、`chassis_uart_bridge`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
+| `Firmware/Drivers/` | 设备驱动（如 `buzzer_drv`、`gw_gray_sensor`、`dflink_uart5`）。新驱动在此新增 `.c/.h`，并加入 Keil 工程与 Include Path。 |
 | `DFcontrol_stm32.ioc` | CubeMX 工程；改时钟/引脚/外设后重新生成代码，注意保留 `main.c` 中 USER 区修改。 |
 
 ---
@@ -87,26 +87,13 @@ bool SampleGrayDigital(void)
 - 发送：**`DflinkUart5_SendFrame(type_a, type_b, payload_c, c_len, tout_ms)`**。线帧：**`0xDF`** | 目标 | 本机 | **A** | **B** | **LEN** | **C** | **`0xFD`** | **ACC 低 16 位（小端）**；校验为从**帧头到帧尾（含 `0xDF` 与 `0xFD`）**逐字节相加取低 16 位，**先发低字节**（如和为 `0x02B3` 则线上为 **`B3 02`**），详见 `dflink_uart5.c`。**A/B 含义、C 编码**以 [DFLink 协议中心](https://differ-tech.pages.dev/dflink-protocol/) 为准。  
 - **匀速位移 sendVelDisplacement（示例 A=`02` B=`64`，LEN=14）**：`**DflinkChassis_SendVelDisplacement**`（`**dflink_chassis_motion.c/.h`**），载荷为 Vx/Vy/Vz（小端，`米×10000`）+ r_max（小端，`m/s×100`）。  
 - **自适应位移 sendpos（A=`02` B=`65`，LEN=14）**：`**DflinkChassis_SendAdaptivePosition**`，p_x/p_y/p_z 小端 S32（`米×10000`），max_spd 小端 S16（`m/s×100`）。  
-- **`HAL_UART_RxCpltCallback` / `HAL_UART_ErrorCallback`** 在 **`debug_uart.c`** 中与 USART1 分支合并；**`UART5_IRQHandler`** 在 **`stm32f4xx_it.c`**。  
+- **`HAL_UART_RxCpltCallback` / `HAL_UART_ErrorCallback`** 在 `debug_uart.c` 中仅转发 UART5 分支；`UART5_IRQHandler` 在 `stm32f4xx_it.c`。  
 - 读应答：**`DflinkUart5_RxAvail()`** / **`DflinkUart5_ReadBytes()`**（按 `0xDF`…`0xFD` 拆帧可在 App 层做）。
 
-### 调试透传：`chassis_uart_bridge`（USART1 ↔ UART5）
+## 调试串口/透传说明
 
-- **`ChassisUartBridge_SetPassthrough(true)`**：PC 经 USART1（115200）与底盘 UART5（460800）**双向字节转发**；**关闭**USART1 **回显**，且 **不再**打印 100 ms **灰度**行。**UART5→USART1**：透传时每 1 ms **`ChassisUartBridge_Process()`** 内 **轮询 `RXNE` 直接读 UART5 DR**（并 **`DflinkUart5_StopRxIt`** 停用 `HAL_UART_Receive_IT`，避免与高波特率、`Receive_IT`/环缓抢同一接收路径）。**USART1→UART5** 仍读 **`DebugUart` 环缓** 后 **`uart_poll_send` 到 UART5**（不写 `HAL_UART_Transmit`，避免与同口 **`HAL_UART_Receive_IT`** 的旧竞争）。超时见 **`FW_CHASSIS_BRIDGE_TX_TIMEOUT_MS`**。  
-- **`ChassisUartBridge_SetPassthrough(false)`**：恢复原回显、灰度周期打印；**`DflinkUart5_StartRx()`** 恢复中断收包。**透传开时不要与 `DflinkUart5_SendFrame` 同时往 UART5 发（会争用底层发送）。**  
-- **`Firmware/Config/fw_config.h`**：**`FW_CHASSIS_UART_BRIDGE_DEFAULT`**：**默认 `0`**（关）；设 **`1`** 上电即透传。也可运行时 **`ChassisUartBridge_SetPassthrough(true/false)`**。
-
-## 调试串口 USART1
-
-- 文件：`Firmware/Drivers/debug_uart.c`、`debug_uart.h`。  
-- **`Bsp_Init()`** 中会调用 **`DebugUart_Init()`**（须在 **`MX_USART1_UART_Init()`** 之后；当前 **`main`** 顺序已满足）。  
-- 硬件：**PA9 TX、PA10 RX**，默认波特率 **`usart.c` 中为 115200 8N1**（可按需在 CubeMX 修改）。  
-- **发送**：`DebugUart_Send(buf, len, tout_ms)`，内部为 **`HAL_UART_Transmit`**（阻塞）。  
-- **接收**：USART1 **`RXNE` 中断** + **512 字节环缓**；读取 **`DebugUart_RxAvail()`** / **`DebugUart_ReadByte`** / **`DebugUart_ReadBytes`**。缓冲区满时会丢弃新字节（避免覆盖未读数据）。  
-- **开机信息**：`**Bsp_Init()`** 在 **`DebugUart_Init()`** 后调用 **`DebugUart_PrintDeviceInfo()`**（固件名、MCU、SYSCLK、波特率、`Rx echo` 提示）。  
-- **原样回显**：`**App_Task_10ms`** 中循环调用 **`DebugUart_EchoRxToTx`**（若未开启 **`ChassisUartBridge`** 透传）。  
-- **`Core/Src/stm32f4xx_it.c`**（`USER CODE`）已实现 **`USART1_IRQHandler`** → **`HAL_UART_IRQHandler(&huart1)`**。  
-- **`HAL_UART_RxCpltCallback` / `HAL_UART_ErrorCallback`**：USART1 调试口与 **UART5 DFLink** 已合并于 **`debug_uart.c`**（转发 **`DflinkUart5_HAL_*`**）。
+- `debug_uart` 与 `chassis_uart_bridge` 的业务功能已删除，当前仅保留最小代码占位以兼容旧工程文件。  
+- 当前应用不再依赖 USART1 进行回显、命令触发或 UART1↔UART5 透传。  
 
 ---
 
@@ -127,7 +114,7 @@ bool SampleGrayDigital(void)
 ### CubeMX 侧建议（按需）
 
 - 八路灰度：**I2C** + 上拉与速率与线长相匹配。  
-- 底盘 DFLink / 步进：通常各占用一条 **UART**（与当前 UART5/USART1 分配一致即可）。  
+- 底盘 DFLink / 步进：通常各占用一条 **UART**（当前已使用 UART5 承载底盘通信）。  
 - 时钟：若板载 **HSE**，建议在 Cube 中统一为 PLL 源，避免长期 HSI 带来串口波特率误差。
 
 ---

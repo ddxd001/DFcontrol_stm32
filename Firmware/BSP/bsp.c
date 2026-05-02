@@ -13,6 +13,4 @@ void Bsp_Init(void)
   DflinkUart5_Init(&huart5);
   DflinkUart5_StartRx();
   ChassisUartBridge_Init();
-  ChassisUartBridge_SetPassthrough(false);
-  DebugUart_PrintDeviceInfo();
 }
