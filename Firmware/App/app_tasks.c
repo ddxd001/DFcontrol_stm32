@@ -95,6 +95,12 @@ static void App_Task_10ms(void)
       } else {
         if (rx == 0x01U) {
           BuzzerDrv_Beep(80U);
+        } else if (rx == 0x02U) {
+          s_q1_start_req = 1U;
+        } else if (rx == 0x03U) {
+          s_q2_case1_start_req = 1U;
+        } else if (rx == 0x04U) {
+          s_q2_case2_start_req = 1U;
         }
         s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
       }
@@ -187,8 +193,8 @@ static void App_Task_100ms(void)
       s_state = 2U;
       break;
 
-    case 2U: /* 前置前进稳定等待约 0.5s */
-      if (s_wait_ticks++ < 5U) {
+    case 2U: /* 前置前进稳定等待约 0.3s */
+      if (s_wait_ticks++ < 3U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -205,8 +211,8 @@ static void App_Task_100ms(void)
       s_state = 4U;
       break;
 
-    case 4U: /* 转向稳定等待约 0.5s */
-      if (s_wait_ticks++ < 5U) {
+    case 4U: /* 转向稳定等待约 0.3s */
+      if (s_wait_ticks++ < 3U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -225,8 +231,8 @@ static void App_Task_100ms(void)
       s_state = 6U;
       break;
 
-    case 6U: /* 行进稳定等待约 2s */
-      if (s_wait_ticks++ < 20U) {
+    case 6U: /* 行进稳定等待约 1.2s */
+      if (s_wait_ticks++ < 12U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -258,8 +264,8 @@ static void App_Task_100ms(void)
       s_state = 8U;
       break;
 
-    case 8U: /* 调头稳定等待约 0.5s */
-      if (s_wait_ticks++ < 5U) {
+    case 8U: /* 调头稳定等待约 0.3s */
+      if (s_wait_ticks++ < 3U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -277,8 +283,8 @@ static void App_Task_100ms(void)
       s_state = 10U;
       break;
 
-    case 10U: /* 返程位移稳定等待约 2s */
-      if (s_wait_ticks++ < 20U) {
+    case 10U: /* 返程位移稳定等待约 1.2s */
+      if (s_wait_ticks++ < 12U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -299,8 +305,8 @@ static void App_Task_100ms(void)
       s_state = 14U;
       break;
 
-    case 14U: /* 右转稳定等待约 0.5s */
-      if (s_wait_ticks++ < 5U) {
+    case 14U: /* 右转稳定等待约 0.3s */
+      if (s_wait_ticks++ < 3U) {
         return;
       }
       s_wait_ticks = 0U;
