@@ -490,6 +490,11 @@
               <FileType>1</FileType>
               <FilePath>../Firmware/Drivers/debug_uart.c</FilePath>
             </File>
+            <File>
+              <FileName>stepper_motor_drv.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Firmware/Drivers/stepper_motor_drv.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

@@ -8,6 +8,8 @@
 #include "dflink_chassis_motion.h"
 #include "fw_config.h"
 #include "gw_gray_sensor.h"
+#include "stepper_motor_drv.h"
+#include "usart.h"
 
 static uint8_t s_q1_start_req;
 static uint8_t s_q2_case1_start_req;
@@ -15,6 +17,8 @@ static uint8_t s_q2_case2_start_req;
 static uint8_t s_q3_case1_start_req;
 static uint8_t s_q3_case2_start_req;
 static uint8_t s_q4_start_req;
+static StepperMotorDrv s_stepper_motor;
+static uint8_t s_stepper_motor_inited;
 static GwGraySensor s_gray_sensor;
 static uint8_t s_gray_sensor_inited;
 static uint8_t s_q3_case1_cross_detect_active;
@@ -53,6 +57,8 @@ static void App_Task_10ms(void)
   static uint32_t s_beep_deadline_ms;
   static uint8_t s_start_guard_init;
   static uint32_t s_start_guard_deadline_ms;
+  const int32_t stepper_pulse_90deg = 800; /* 默认按 3200 脉冲/圈换算，需按实机标定 */
+  const int32_t stepper_speed_turn = 100;
   uint32_t now_ms;
 
   now_ms = HAL_GetTick();
@@ -133,6 +139,28 @@ static void App_Task_10ms(void)
           s_q3_case2_start_req = 1U;
         } else if (rx == 0x07U) {
           s_q4_start_req = 1U;
+        } else if (rx == 0x08U) {
+          if (s_stepper_motor_inited != 0U) {
+            (void)StepperMotorDrv_Enable(&s_stepper_motor);
+          }
+        } else if (rx == 0x09U) {
+          if (s_stepper_motor_inited != 0U) {
+            (void)StepperMotorDrv_Disable(&s_stepper_motor);
+          }
+        } else if (rx == 0x0AU) {
+          if (s_stepper_motor_inited != 0U) {
+            s_stepper_motor.pos_mode = STEPPER_POS_RELATIVE;
+            s_stepper_motor.speed = stepper_speed_turn;
+            s_stepper_motor.pulse = -stepper_pulse_90deg; /* 左转90度 */
+            (void)StepperMotorDrv_RunPosition(&s_stepper_motor);
+          }
+        } else if (rx == 0x0BU) {
+          if (s_stepper_motor_inited != 0U) {
+            s_stepper_motor.pos_mode = STEPPER_POS_RELATIVE;
+            s_stepper_motor.speed = stepper_speed_turn;
+            s_stepper_motor.pulse = stepper_pulse_90deg; /* 右转90度 */
+            (void)StepperMotorDrv_RunPosition(&s_stepper_motor);
+          }
         }
         s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
       }
@@ -571,6 +599,8 @@ static void App_Task_100ms(void)
 void App_RegisterTasks(void)
 {
   ButtonDrv_Init();
+  StepperMotorDrv_Init(&s_stepper_motor, &huart2, 0x01U);
+  s_stepper_motor_inited = 1U;
   GwGraySensor_InitDefaults(&s_gray_sensor, &hi2c1);
   s_gray_sensor_inited = GwGraySensor_InitPingWait(&s_gray_sensor, 300U) ? 1U : 0U;
   s_q3_case1_cross_detect_active = 0U;
