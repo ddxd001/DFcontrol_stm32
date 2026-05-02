@@ -586,6 +586,7 @@ static void App_Task_100ms(void)
   const int32_t move_py_m21739 = 21739; /* 1.0m * 21739 */
   const int32_t move_py_test1_02_m21739 = 4348; /* 0.2m * 21739 */
   const int32_t move_py_test1_04_m21739 = 8696; /* 0.4m * 21739 */
+  const int32_t move_py_q3_case2_start_m21739 = 2174; /* 0.1m * 21739 */
   const int32_t move_py_test3_case1_m21739 = 16196; /* 0.745m * 21739 */
   const int32_t move_py_test3_case2_m21739 = 16196; /* 0.745m * 21739 */
   const int32_t move_py_test3_case3_m21739 = 10217; /* 0.47m * 21739 */
@@ -609,6 +610,9 @@ static void App_Task_100ms(void)
   const int32_t rot_right_90 = 900000;  /* +90deg * 10000 */
   const int32_t rot_u_turn = -1800000;  /* -180deg * 10000 */
   const int16_t rot_vmax = 1500;        /* 15 deg/s * 100 */
+  const int16_t rot_vmax_q3_case2_slow = 1200; /* 12 deg/s * 100，Q3-2后3次右转慢一点 */
+  const uint8_t wait_ticks_q3_case2_first_turn = 2U; /* 第1次右转后等待减少200ms */
+  const uint8_t wait_ticks_q3_case2_other_turn = 4U; /* 后3次右转后等待减少200ms */
   const uint8_t wait_ticks_default = 14U;          /* 1.4s */
   const uint8_t wait_ticks_detect_seg = 22U;       /* 约2.2s，0.4m检测段等待 */
   const uint8_t wait_ticks_pre_detect = 6U;        /* 0.6s，校准直行后进入测量段前等待 */
@@ -827,16 +831,11 @@ static void App_Task_100ms(void)
     case 0U: /* 等待 PD3(Q1) / PD4(Q2-1) / PD5(Q2-2) */
       return;
 
-    case 1U: /* 启动动作：Q3-2 匀速前进1m，其余先前进0.08m */
+    case 1U: /* 启动动作：Q3-2按专用流程，其余先前进0.08m */
       if (s_mode == 5U) {
-        st = DflinkChassis_SendVelDisplacement(
-            move_px_m21739, move_py_m21739, move_pz_m21739,
-            move_speed_q3_case2_uniform_mps100, 200U);
-        if (st != HAL_OK) {
-          return;
-        }
         s_wait_ticks = 0U;
-        s_state = 15U;
+        s_round = 0U;
+        s_state = 92U;
         break;
       } else if (s_mode == 6U) {
         st = DflinkChassis_SendAdaptConstPMove(0, pre_move_y_m21739, 0,
@@ -1000,7 +999,7 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 15U: /* Q3-2 匀速前进1m后等待约1.2s结束 */
+    case 15U: /* 兼容保留：旧Q3-2流程（当前不再进入） */
       if (s_wait_ticks++ < 12U) {
         return;
       }
@@ -1238,8 +1237,13 @@ static void App_Task_100ms(void)
       break;
 
     case 38U: /* TEST1: 末段稳定等待后停车 */
-      if (s_wait_ticks++ < wait_ticks_default) {
+      if (s_wait_ticks++ < ((s_mode == 5U) ? 12U : wait_ticks_default)) {
         return;
+      }
+      if (s_mode == 5U) {
+        s_wait_ticks = 0U;
+        s_state = 101U;
+        break;
       }
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
@@ -1586,6 +1590,121 @@ static void App_Task_100ms(void)
       break;
 
     case 91U: /* TEST4: 后退稳定等待后停车 */
+      if (s_wait_ticks++ < wait_ticks_default) {
+        return;
+      }
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
+    case 92U: /* Q3-2: 先自适应前进 0.1m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q3_case2_start_m21739, move_pz_m21739,
+                                             move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 93U;
+      break;
+
+    case 93U: /* Q3-2: 0.1m 稳定等待 */
+      if (s_wait_ticks++ < 4U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 94U;
+      break;
+
+    case 94U: /* Q3-2: （右转90 + 自适应1m）循环2次 */
+      if (s_round >= 2U) {
+        s_state = 98U; /* 循环完成，进入测距前右转 */
+      } else {
+        s_state = 95U;
+      }
+      break;
+
+    case 95U: /* Q3-2: 右转 90 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_right_90,
+                                      (s_round == 0U) ? rot_vmax : rot_vmax_q3_case2_slow, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 96U;
+      break;
+
+    case 96U: /* Q3-2: 右转后稳定等待 */
+      if (s_wait_ticks++ < ((s_round == 0U) ? wait_ticks_q3_case2_first_turn
+                                            : wait_ticks_q3_case2_other_turn)) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 97U;
+      break;
+
+    case 97U: /* Q3-2: 自适应直走 1m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_m21739, move_pz_m21739,
+                                             move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 107U;
+      break;
+
+    case 107U: /* Q3-2: 1m 稳定等待后进入下一轮 */
+      if (s_wait_ticks++ < wait_ticks_default) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_round++;
+      s_state = 94U;
+      break;
+
+    case 98U: /* Q3-2: 进入测距流程前再右转 90 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_right_90, rot_vmax_q3_case2_slow, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 99U;
+      break;
+
+    case 99U: /* Q3-2: 转向稳定等待 */
+      if (s_wait_ticks++ < wait_ticks_q3_case2_other_turn) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 30U; /* 进入与TEST1同构的测距流程 */
+      break;
+
+    case 101U: /* Q3-2: 测距流程后右转 90 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_right_90, rot_vmax_q3_case2_slow, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 102U;
+      break;
+
+    case 102U: /* Q3-2: 末次右转后稳定等待 */
+      if (s_wait_ticks++ < wait_ticks_q3_case2_other_turn) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 103U;
+      break;
+
+    case 103U: /* Q3-2: 末次自适应直走 0.9m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_ret_last_m21739, move_pz_m21739,
+                                             move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 104U;
+      break;
+
+    case 104U: /* Q3-2: 收尾稳定等待后停车 */
       if (s_wait_ticks++ < wait_ticks_default) {
         return;
       }
