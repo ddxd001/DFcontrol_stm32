@@ -22,6 +22,9 @@ static uint8_t s_test2_start_req;
 static uint8_t s_pending_beeps;
 static StepperMotorDrv s_stepper_motor;
 static uint8_t s_stepper_motor_inited;
+static uint8_t s_stepper_motor_enabled;
+static uint8_t s_heading_lock_enabled;
+static uint8_t s_heading_lock_init_done;
 static GwGraySensor s_gray_sensor;
 static uint8_t s_gray_sensor_inited;
 static uint8_t s_q3_case1_cross_detect_active;
@@ -206,12 +209,38 @@ static void App_Task_10ms(void)
     s_q4_start_req = 0U;
     s_test1_start_req = 0U;
     s_test2_start_req = 0U;
+    s_heading_lock_init_done = 0U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
     s_q1_start_req = 1U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
-    s_q2_case1_start_req = 1U;
+    if (s_stepper_motor_inited != 0U) {
+      HAL_StatusTypeDef st_stepper;
+      uint8_t next_enable;
+      next_enable = (s_stepper_motor_enabled == 0U) ? 1U : 0U;
+      st_stepper = next_enable ? StepperMotorDrv_Enable(&s_stepper_motor)
+                               : StepperMotorDrv_Disable(&s_stepper_motor);
+      if (st_stepper == HAL_OK) {
+        s_stepper_motor_enabled = next_enable;
+        BuzzerDrv_Beep(80U);
+      }
+    }
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD5)) {
-    s_q2_case2_start_req = 1U;
+    HAL_StatusTypeDef st_lock;
+    uint8_t next_lock;
+    next_lock = (s_heading_lock_enabled == 0U) ? 1U : 0U;
+    st_lock = DflinkChassis_SetHeadingLock(next_lock, 200U);
+    if (st_lock == HAL_OK) {
+      s_heading_lock_enabled = next_lock;
+      BuzzerDrv_Beep(80U);
+    }
+  }
+
+  if (s_heading_lock_init_done == 0U &&
+      (int32_t)(now_ms - s_start_guard_deadline_ms) >= 0) {
+    if (DflinkChassis_SetHeadingLock(1U, 200U) == HAL_OK) {
+      s_heading_lock_enabled = 1U;
+      s_heading_lock_init_done = 1U;
+    }
   }
 
   if (s_beep_stage == 0U && s_pending_beeps > 0U) {
@@ -964,8 +993,11 @@ static void App_Task_100ms(void)
 void App_RegisterTasks(void)
 {
   ButtonDrv_Init();
+  s_heading_lock_enabled = 1U;
+  s_heading_lock_init_done = 0U;
   StepperMotorDrv_Init(&s_stepper_motor, &huart2, 0x01U);
   s_stepper_motor_inited = 1U;
+  s_stepper_motor_enabled = 0U;
   GwGraySensor_InitDefaults(&s_gray_sensor, &hi2c1);
   s_gray_sensor_inited = GwGraySensor_InitPingWait(&s_gray_sensor, 300U) ? 1U : 0U;
   s_q3_case1_cross_detect_active = 0U;

@@ -17,6 +17,14 @@
 #define DFLINK_ROT_TYPE_A      0x02U
 #define DFLINK_ROT_TYPE_B      0x66U
 #define DFLINK_ROT_C_LEN       10U
+/* HeadingLock_F: A=0x01, B=0x4F, LEN=1 */
+#define DFLINK_HEADING_LOCK_TYPE_A 0x01U
+#define DFLINK_HEADING_LOCK_TYPE_B 0x4FU
+#define DFLINK_HEADING_LOCK_C_LEN  1U
+/* 控制类命令回传: A=0x46, B继承当前命令号(本命令为0x4F), LEN=2 */
+#define DFLINK_CTRL_ACK_TYPE_A     0x46U
+#define DFLINK_CTRL_ACK_B_HEADING  0x4FU
+#define DFLINK_CTRL_ACK_C_LEN      2U
 
 /**
  * 匀速位移 sendVelDisplacement（数据位 C 共 14 字节）
@@ -66,6 +74,16 @@ HAL_StatusTypeDef DflinkChassis_SendRotation(int16_t rx_deg_times100,
                                              int32_t rz_deg_times10000,
                                              int16_t rmax_dps_times100,
                                              uint32_t tout_ms);
+
+/**
+ * 锁头模式 HeadingLock_F（A=0x01, B=0x4F, LEN=1）
+ * payload:
+ *  - Enable: U8, 0=关闭, 1=开启（默认建议上电置1）
+ *
+ * 回传闭环（设备通常会回）:
+ *  - A=0x46, B=0x4F, LEN=2
+ */
+HAL_StatusTypeDef DflinkChassis_SetHeadingLock(uint8_t enable, uint32_t tout_ms);
 
 #define DFLINK_ROT_DEG_AS_UNIT100(deg_int)      ((int16_t)((deg_int) * 100))
 #define DFLINK_ROT_DEG_AS_UNIT10000(deg_int)    ((int32_t)((deg_int) * 10000))

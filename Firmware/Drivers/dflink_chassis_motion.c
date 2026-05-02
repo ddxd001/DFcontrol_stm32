@@ -84,3 +84,12 @@ HAL_StatusTypeDef DflinkChassis_SendAdaptConstPMove(int32_t px_m_times21739,
   return DflinkUart5_SendFrame(DFLINK_ADAPT_MOVE_TYPE_A, DFLINK_ADAPT_MOVE_TYPE_B, c,
                                DFLINK_ADAPT_MOVE_C_LEN, tout_ms);
 }
+
+HAL_StatusTypeDef DflinkChassis_SetHeadingLock(uint8_t enable, uint32_t tout_ms)
+{
+  uint8_t c[DFLINK_HEADING_LOCK_C_LEN];
+
+  c[0] = (enable != 0U) ? 1U : 0U;
+  return DflinkUart5_SendFrame(DFLINK_HEADING_LOCK_TYPE_A, DFLINK_HEADING_LOCK_TYPE_B, c,
+                               DFLINK_HEADING_LOCK_C_LEN, tout_ms);
+}
