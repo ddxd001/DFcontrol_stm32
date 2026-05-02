@@ -22,7 +22,7 @@
 ## 程序启动顺序
 
 1. `HAL_Init()` → `SystemClock_Config()`  
-2. `MX_GPIO_Init()`、`MX_I2C1_Init()`、`MX_UART5_Init()`、`MX_USART1_UART_Init()` 等（以外设实际配置为准）  
+2. `MX_GPIO_Init()`、`MX_I2C1_Init()`、`MX_UART4_Init()`、`MX_UART5_Init()`、`MX_USART1_UART_Init()`、`MX_USART2_UART_Init()` 等（以外设实际配置为准）  
 3. **`App_Init()`**：`Fault_Init()`、`Bsp_Init()`（内部可再调各驱动的 `*_Init()`）  
 4. **`App_StartScheduling()`**：`Scheduler_Init()` + `App_RegisterTasks()`  
 5. 主循环：**`Scheduler_RunPending()`**（按节拍调用已到期的周期任务）
@@ -90,10 +90,35 @@ bool SampleGrayDigital(void)
 - **`HAL_UART_RxCpltCallback` / `HAL_UART_ErrorCallback`** 在 `debug_uart.c` 中仅转发 UART5 分支；`UART5_IRQHandler` 在 `stm32f4xx_it.c`。  
 - 读应答：**`DflinkUart5_RxAvail()`** / **`DflinkUart5_ReadBytes()`**（按 `0xDF`…`0xFD` 拆帧可在 App 层做）。
 
-## 调试串口/透传说明
+## 当前功能概览（与代码对齐）
 
-- `debug_uart` 与 `chassis_uart_bridge` 的业务功能已删除，当前仅保留最小代码占位以兼容旧工程文件。  
-- 当前应用不再依赖 USART1 进行回显、命令触发或 UART1↔UART5 透传。  
+- **USART1 指令触发**：`AA BB XX` 协议触发 Q1~Q4、TEST1~TEST4、步进电机控制等。
+- **底盘运动控制**：通过 `UART5 + DFLink` 下发自适应位移、匀速位移、转向、锁头等控制指令。
+- **路口检测与测距**：
+  - 灰度检测频率 100Hz（`App_Task_10ms`）
+  - 含连续帧确认滤波（时间层）
+  - 测距结果支持 `CROSS` / `DIST` 输出，并在测距段结束后统一发送
+- **蓝牙距离上报（UART4）**：
+  - 测距段结束后向蓝牙发送两行：`l1 = ...cm`、`l2 = ...cm`
+  - 缺失项默认发送 `2.5cm`
+- **步进电机（USART2）**：支持使能/失能与 90° 相对转动。
+
+## 串口与通信说明
+
+- `USART1`：任务指令与调试输出（`DebugUart`）。
+- `UART4`：蓝牙模块数据发送（测距结果 `l1/l2`）。
+- `UART5`：底盘 DFLink 通信。
+- `USART2`：步进电机驱动串口。
+
+---
+
+## 任务与指令文档
+
+- 详细指令与动作流程请查看：`Firmware/App/UART_COMMAND_TASKS.md`
+- 该文档与 `Firmware/App/app_tasks.c` 同步维护，包含：
+  - 指令总表（`AA BB 01/02/.../D6`）
+  - Q/TEST 动作步骤与关键参数
+  - 测距公式、滤波参数、蓝牙发送格式
 
 ---
 
