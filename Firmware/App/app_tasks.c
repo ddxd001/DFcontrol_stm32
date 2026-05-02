@@ -23,6 +23,7 @@ static uint8_t s_test3_case1_start_req;
 static uint8_t s_test3_case2_start_req;
 static uint8_t s_test3_case3_start_req;
 static uint8_t s_test3_case4_start_req;
+static uint8_t s_test4_start_req;
 static uint8_t s_pending_beeps;
 static StepperMotorDrv s_stepper_motor;
 static uint8_t s_stepper_motor_inited;
@@ -37,9 +38,14 @@ static uint8_t s_q3_case1_cross_latched;
 static uint8_t s_test1_dist_measure_active;
 static uint8_t s_test1_last_cross_valid;
 static uint32_t s_test1_last_cross_tick_ms;
+static uint8_t s_cross_raw_on_cnt;
+static uint8_t s_cross_raw_off_cnt;
+static uint8_t s_cross_confirmed;
 static int32_t s_measure_corr_rz10000;
 #define APP_MEAS_LOG_MAX 16U
 #define APP_MEAS_EXPECT_CROSS_COUNT 3U
+#define APP_CROSS_ON_CONFIRM_FRAMES 7U
+#define APP_CROSS_OFF_CONFIRM_FRAMES 4U
 #define APP_DIST_CM_X10_MIN 10U  /* 1.0cm */
 #define APP_DIST_CM_X10_MAX 50U  /* 5.0cm */
 static uint8_t s_meas_log_cross_idx[APP_MEAS_LOG_MAX];
@@ -58,6 +64,9 @@ static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_
   s_test1_dist_measure_active = 0U;
   s_test1_last_cross_valid = 0U;
   s_test1_last_cross_tick_ms = 0U;
+  s_cross_raw_on_cnt = 0U;
+  s_cross_raw_off_cnt = 0U;
+  s_cross_confirmed = 0U;
   s_measure_corr_rz10000 = 0;
   s_meas_log_count = 0U;
   *mode = 0U;
@@ -145,6 +154,69 @@ static void App_SendDistCm1(uint32_t dist_cm_x10)
   (void)DebugUart_Send(msg, n, 50U);
 }
 
+static uint8_t App_AppendCm1ToMsg(uint8_t *msg, uint8_t n, uint32_t dist_cm_x10)
+{
+  uint8_t digits[10];
+  uint8_t dlen;
+  uint32_t v;
+  uint8_t frac;
+  uint8_t i;
+
+  v = dist_cm_x10 / 10U;
+  frac = (uint8_t)(dist_cm_x10 % 10U);
+  if (v == 0U) {
+    msg[n++] = '0';
+  } else {
+    dlen = 0U;
+    while (v > 0U && dlen < (uint8_t)sizeof(digits)) {
+      digits[dlen++] = (uint8_t)(v % 10U);
+      v /= 10U;
+    }
+    for (i = 0U; i < dlen; i++) {
+      msg[n++] = (uint8_t)('0' + digits[dlen - 1U - i]);
+    }
+  }
+  msg[n++] = '.';
+  msg[n++] = (uint8_t)('0' + frac);
+  msg[n++] = 'c';
+  msg[n++] = 'm';
+  return n;
+}
+
+static void App_SendBtMeasureL12(uint32_t l1_cm_x10, uint32_t l2_cm_x10)
+{
+  uint8_t msg[48];
+  uint8_t n;
+
+  /* 蓝牙发送格式：
+   *
+   * \r\n
+   * l1 = 数据1cm\r\n
+   * l2 = 数据2cm\r\n
+   */
+  n = 0U;
+  msg[n++] = '\r';
+  msg[n++] = '\n';
+  msg[n++] = 'l';
+  msg[n++] = '1';
+  msg[n++] = ' ';
+  msg[n++] = '=';
+  msg[n++] = ' ';
+  n = App_AppendCm1ToMsg(msg, n, l1_cm_x10);
+  msg[n++] = '\r';
+  msg[n++] = '\n';
+  msg[n++] = 'l';
+  msg[n++] = '2';
+  msg[n++] = ' ';
+  msg[n++] = '=';
+  msg[n++] = ' ';
+  n = App_AppendCm1ToMsg(msg, n, l2_cm_x10);
+  msg[n++] = '\r';
+  msg[n++] = '\n';
+
+  (void)HAL_UART_Transmit(&huart4, msg, n, 50U);
+}
+
 static void App_ClearMeasureLogs(void)
 {
   s_meas_log_count = 0U;
@@ -153,19 +225,37 @@ static void App_ClearMeasureLogs(void)
 static void App_FlushMeasureLogs(void)
 {
   uint8_t i;
+  uint32_t l1_cm_x10;
+  uint32_t l2_cm_x10;
+  uint8_t dist_idx;
+
+  l1_cm_x10 = 25U; /* 缺失项默认发送 2.5cm */
+  l2_cm_x10 = 25U; /* 缺失项默认发送 2.5cm */
+  dist_idx = 0U;
 
   for (i = 0U; i < s_meas_log_count; i++) {
     App_SendCrossIndexed(s_meas_log_cross_idx[i]);
     if (s_meas_log_has_dist[i] != 0U) {
       App_SendDistCm1(s_meas_log_dist_x10[i]);
+      if (dist_idx == 0U) {
+        l1_cm_x10 = s_meas_log_dist_x10[i];
+        dist_idx = 1U;
+      } else if (dist_idx == 1U) {
+        l2_cm_x10 = s_meas_log_dist_x10[i];
+        dist_idx = 2U;
+      }
     }
   }
+
+  /* 测距段结束后，同步将两段距离通过蓝牙（UART4）发送。 */
+  App_SendBtMeasureL12(l1_cm_x10, l2_cm_x10);
   s_meas_log_count = 0U;
 }
 
 static void App_ProcessCrossDetect10ms(void)
 {
   bool is_cross;
+  bool raw_cross;
   bool read_ok;
 
   if (s_q3_case1_cross_detect_active == 0U || s_gray_sensor_inited == 0U) {
@@ -173,8 +263,30 @@ static void App_ProcessCrossDetect10ms(void)
   }
 
   read_ok = GwGray_ReadAndDetectCross(&s_gray_sensor, APP_GRAY_CROSS_MIN_ACTIVE_BITS, &is_cross);
+  if (!read_ok) {
+    return;
+  }
 
-  if (read_ok && is_cross != 0U) {
+  raw_cross = (is_cross != 0U);
+  if (raw_cross) {
+    if (s_cross_raw_on_cnt < 255U) {
+      s_cross_raw_on_cnt++;
+    }
+    s_cross_raw_off_cnt = 0U;
+    if (s_cross_confirmed == 0U && s_cross_raw_on_cnt >= APP_CROSS_ON_CONFIRM_FRAMES) {
+      s_cross_confirmed = 1U;
+    }
+  } else {
+    if (s_cross_raw_off_cnt < 255U) {
+      s_cross_raw_off_cnt++;
+    }
+    s_cross_raw_on_cnt = 0U;
+    if (s_cross_confirmed != 0U && s_cross_raw_off_cnt >= APP_CROSS_OFF_CONFIRM_FRAMES) {
+      s_cross_confirmed = 0U;
+    }
+  }
+
+  if (s_cross_confirmed != 0U) {
     if (s_q3_case1_cross_latched == 0U) {
       uint32_t now_ms;
       uint8_t slot;
@@ -420,6 +532,8 @@ static void App_Task_10ms(void)
           s_test3_case3_start_req = 1U;
         } else if (rx == 0xD5U) {
           s_test3_case4_start_req = 1U;
+        } else if (rx == 0xD6U) {
+          s_test4_start_req = 1U;
         } else if (rx == 0x08U) {
           if (s_stepper_motor_inited != 0U) {
             (void)StepperMotorDrv_Enable(&s_stepper_motor);
@@ -459,7 +573,7 @@ static void App_Task_100ms(void)
 #if FW_Q1_ENABLE != 0
   static uint8_t s_boot_guard_init;
   static uint32_t s_boot_guard_deadline_ms;
-  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4 */
+  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4 */
   static uint8_t s_state;
   static uint8_t s_wait_ticks;
   static uint8_t s_round;
@@ -519,6 +633,7 @@ static void App_Task_100ms(void)
     s_test3_case2_start_req = 0U;
     s_test3_case3_start_req = 0U;
     s_test3_case4_start_req = 0U;
+    s_test4_start_req = 0U;
     s_mode = 0U;
     s_state = 0U;
     s_wait_ticks = 0U;
@@ -689,6 +804,20 @@ static void App_Task_100ms(void)
     s_test1_last_cross_tick_ms = 0U;
     s_mode = 12U;
     s_state = 82U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_test4_start_req != 0U) {
+    s_test4_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_test1_dist_measure_active = 0U;
+    s_test1_last_cross_valid = 0U;
+    s_test1_last_cross_tick_ms = 0U;
+    s_mode = 13U;
+    s_state = 86U;
     s_wait_ticks = 0U;
     s_round = 0U;
     s_ret_seg = 0U;
@@ -1052,6 +1181,9 @@ static void App_Task_100ms(void)
       s_q3_case1_cross_detect_active = 1U;
       s_q3_case1_cross_count = 0U;
       s_q3_case1_cross_latched = 0U;
+      s_cross_raw_on_cnt = 0U;
+      s_cross_raw_off_cnt = 0U;
+      s_cross_confirmed = 0U;
       s_test1_dist_measure_active = 1U;
       s_test1_last_cross_valid = 0U;
       s_test1_last_cross_tick_ms = 0U;
@@ -1202,6 +1334,9 @@ static void App_Task_100ms(void)
       s_q3_case1_cross_detect_active = 1U;
       s_q3_case1_cross_count = 0U;
       s_q3_case1_cross_latched = 0U;
+      s_cross_raw_on_cnt = 0U;
+      s_cross_raw_off_cnt = 0U;
+      s_cross_confirmed = 0U;
       s_test1_dist_measure_active = 1U;
       s_test1_last_cross_valid = 0U;
       s_test1_last_cross_tick_ms = 0U;
@@ -1404,6 +1539,59 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
+    case 86U: /* TEST4: 自适应前进 0.55m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q4_first_m21739,
+                                             move_pz_m21739, move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 87U;
+      break;
+
+    case 87U: /* TEST4: 等待 4.0s */
+      if (s_wait_ticks++ < 40U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 88U;
+      break;
+
+    case 88U: /* TEST4: 自适应前进 0.45m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q4_second_m21739,
+                                             move_pz_m21739, move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 89U;
+      break;
+
+    case 89U: /* TEST4: 第二段前进后稳定等待 */
+      if (s_wait_ticks++ < wait_ticks_default) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 90U;
+      break;
+
+    case 90U: /* TEST4: 向后走 1.0m，速度10 */
+      st = DflinkChassis_SendVelDisplacement(move_px_m21739, -move_py_m21739, move_pz_m21739,
+                                             move_speed_q3_case2_uniform_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 91U;
+      break;
+
+    case 91U: /* TEST4: 后退稳定等待后停车 */
+      if (s_wait_ticks++ < wait_ticks_default) {
+        return;
+      }
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
     default:
       break;
   }
@@ -1426,6 +1614,9 @@ void App_RegisterTasks(void)
   s_test1_dist_measure_active = 0U;
   s_test1_last_cross_valid = 0U;
   s_test1_last_cross_tick_ms = 0U;
+  s_cross_raw_on_cnt = 0U;
+  s_cross_raw_off_cnt = 0U;
+  s_cross_confirmed = 0U;
   s_meas_log_count = 0U;
 
   (void)Scheduler_AddTask(App_Task_1ms,   1U);
