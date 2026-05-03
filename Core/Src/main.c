@@ -94,6 +94,7 @@ int main(void)
   MX_I2C1_Init();
   MX_UART5_Init();
   MX_UART4_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
   App_Init();
   App_StartScheduling();

@@ -17,6 +17,7 @@ static uint8_t s_q2_case2_start_req;
 static uint8_t s_q3_case1_start_req;
 static uint8_t s_q3_case2_start_req;
 static uint8_t s_q4_start_req;
+static uint8_t s_q4_case1_start_req;
 static uint8_t s_test1_start_req;
 static uint8_t s_test2_start_req;
 static uint8_t s_test3_case1_start_req;
@@ -24,7 +25,13 @@ static uint8_t s_test3_case2_start_req;
 static uint8_t s_test3_case3_start_req;
 static uint8_t s_test3_case4_start_req;
 static uint8_t s_test4_start_req;
+static uint8_t s_test5_start_req;
+static uint8_t s_q4v_uart6_wait_resp;
+static uint8_t s_q4v_uart6_resp_ready;
+static uint8_t s_q4v_uart6_resp_code;
 static uint8_t s_pending_beeps;
+static uint8_t s_pd3_q4v_phase;   /* 0=未发 handshake，1=已发 AA CC DD，待第二次按键启动 Q4-V */
+static uint8_t s_pd3_bb_beep_done; /* 本周期内已对 AA CC BB 蜂鸣过一次 */
 static StepperMotorDrv s_stepper_motor;
 static uint8_t s_stepper_motor_inited;
 static uint8_t s_stepper_motor_enabled;
@@ -69,6 +76,9 @@ static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_
   s_cross_confirmed = 0U;
   s_measure_corr_rz10000 = 0;
   s_meas_log_count = 0U;
+  s_q4v_uart6_wait_resp = 0U;
+  s_q4v_uart6_resp_ready = 0U;
+  s_q4v_uart6_resp_code = 0U;
   *mode = 0U;
   *state = 0U;
   *wait_ticks = 0U;
@@ -76,82 +86,28 @@ static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_
   *ret_seg = 0U;
 }
 
-static void App_SendCrossIndexed(uint8_t idx)
+static void App_Motion_StopNoBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_ticks,
+                                  uint8_t *round, uint8_t *ret_seg)
 {
-  uint8_t msg[12];
-  uint8_t n;
-  uint8_t d2;
-  uint8_t d1;
-  uint8_t d0;
-
-  msg[0] = 'C';
-  msg[1] = 'R';
-  msg[2] = 'O';
-  msg[3] = 'S';
-  msg[4] = 'S';
-  msg[5] = ':';
-  n = 6U;
-
-  if (idx >= 100U) {
-    d2 = (uint8_t)(idx / 100U);
-    d1 = (uint8_t)((idx % 100U) / 10U);
-    d0 = (uint8_t)(idx % 10U);
-    msg[n++] = (uint8_t)('0' + d2);
-    msg[n++] = (uint8_t)('0' + d1);
-    msg[n++] = (uint8_t)('0' + d0);
-  } else if (idx >= 10U) {
-    d1 = (uint8_t)(idx / 10U);
-    d0 = (uint8_t)(idx % 10U);
-    msg[n++] = (uint8_t)('0' + d1);
-    msg[n++] = (uint8_t)('0' + d0);
-  } else {
-    msg[n++] = (uint8_t)('0' + idx);
-  }
-
-  msg[n++] = '\r';
-  msg[n++] = '\n';
-  (void)DebugUart_Send(msg, n, 50U);
-}
-
-static void App_SendDistCm1(uint32_t dist_cm_x10)
-{
-  uint8_t msg[22];
-  uint8_t digits[10];
-  uint8_t n;
-  uint8_t dlen;
-  uint32_t v;
-  uint8_t frac;
-  uint8_t i;
-
-  msg[0] = 'D';
-  msg[1] = 'I';
-  msg[2] = 'S';
-  msg[3] = 'T';
-  msg[4] = ':';
-  n = 5U;
-
-  v = dist_cm_x10 / 10U;
-  frac = (uint8_t)(dist_cm_x10 % 10U);
-  if (v == 0U) {
-    msg[n++] = '0';
-  } else {
-    dlen = 0U;
-    while (v > 0U && dlen < (uint8_t)sizeof(digits)) {
-      digits[dlen++] = (uint8_t)(v % 10U);
-      v /= 10U;
-    }
-    for (i = 0U; i < dlen; i++) {
-      msg[n++] = (uint8_t)('0' + digits[dlen - 1U - i]);
-    }
-  }
-
-  msg[n++] = '.';
-  msg[n++] = (uint8_t)('0' + frac);
-  msg[n++] = 'c';
-  msg[n++] = 'm';
-  msg[n++] = '\r';
-  msg[n++] = '\n';
-  (void)DebugUart_Send(msg, n, 50U);
+  s_q3_case1_cross_detect_active = 0U;
+  s_q3_case1_cross_count = 0U;
+  s_q3_case1_cross_latched = 0U;
+  s_test1_dist_measure_active = 0U;
+  s_test1_last_cross_valid = 0U;
+  s_test1_last_cross_tick_ms = 0U;
+  s_cross_raw_on_cnt = 0U;
+  s_cross_raw_off_cnt = 0U;
+  s_cross_confirmed = 0U;
+  s_measure_corr_rz10000 = 0;
+  s_meas_log_count = 0U;
+  s_q4v_uart6_wait_resp = 0U;
+  s_q4v_uart6_resp_ready = 0U;
+  s_q4v_uart6_resp_code = 0U;
+  *mode = 0U;
+  *state = 0U;
+  *wait_ticks = 0U;
+  *round = 0U;
+  *ret_seg = 0U;
 }
 
 static uint8_t App_AppendCm1ToMsg(uint8_t *msg, uint8_t n, uint32_t dist_cm_x10)
@@ -217,11 +173,6 @@ static void App_SendBtMeasureL12(uint32_t l1_cm_x10, uint32_t l2_cm_x10)
   (void)HAL_UART_Transmit(&huart4, msg, n, 50U);
 }
 
-static void App_ClearMeasureLogs(void)
-{
-  s_meas_log_count = 0U;
-}
-
 static void App_FlushMeasureLogs(void)
 {
   uint8_t i;
@@ -234,9 +185,7 @@ static void App_FlushMeasureLogs(void)
   dist_idx = 0U;
 
   for (i = 0U; i < s_meas_log_count; i++) {
-    App_SendCrossIndexed(s_meas_log_cross_idx[i]);
     if (s_meas_log_has_dist[i] != 0U) {
-      App_SendDistCm1(s_meas_log_dist_x10[i]);
       if (dist_idx == 0U) {
         l1_cm_x10 = s_meas_log_dist_x10[i];
         dist_idx = 1U;
@@ -247,8 +196,12 @@ static void App_FlushMeasureLogs(void)
     }
   }
 
-  /* 测距段结束后，同步将两段距离通过蓝牙（UART4）发送。 */
   App_SendBtMeasureL12(l1_cm_x10, l2_cm_x10);
+  s_meas_log_count = 0U;
+}
+
+static void App_ClearMeasureLogs(void)
+{
   s_meas_log_count = 0U;
 }
 
@@ -407,6 +360,12 @@ static void App_Task_10ms(void)
   static uint8_t s_beep_remain;
   static uint8_t s_beep_stage;
   static uint8_t s_uart_seq_state;
+  static uint8_t s_uart6_rx_prev1;
+  static uint8_t s_uart6_rx_prev2;
+  static uint8_t s_uart6_link_wait_resp;
+  static uint8_t s_uart6_test5_active;
+  static uint32_t s_uart6_link_deadline_ms;
+  static uint32_t s_uart6_test5_deadline_ms;
   static uint32_t s_beep_deadline_ms;
   static uint8_t s_start_guard_init;
   static uint32_t s_start_guard_deadline_ms;
@@ -435,9 +394,21 @@ static void App_Task_10ms(void)
     s_q4_start_req = 0U;
     s_test1_start_req = 0U;
     s_test2_start_req = 0U;
+    s_test5_start_req = 0U;
+    s_pd3_q4v_phase = 0U;
+    s_pd3_bb_beep_done = 0U;
     s_heading_lock_init_done = 0U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
-    s_q1_start_req = 1U;
+    static const uint8_t k_uart6_aa_cc_dd[3] = {0xAAU, 0xCCU, 0xDDU};
+    if (s_pd3_q4v_phase == 0U) {
+      if (DebugUart6_Send(k_uart6_aa_cc_dd, 3U, 50U) == HAL_OK) {
+        s_pd3_q4v_phase = 1U;
+        s_pd3_bb_beep_done = 0U;
+      }
+    } else {
+      s_q4_start_req = 1U; /* Q4-V，与同任务串口 AA BB 0B 等价 */
+      s_pd3_q4v_phase = 0U;
+    }
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
     if (s_stepper_motor_inited != 0U) {
       HAL_StatusTypeDef st_stepper;
@@ -519,7 +490,7 @@ static void App_Task_10ms(void)
         } else if (rx == 0x06U) {
           s_q3_case2_start_req = 1U;
         } else if (rx == 0x07U) {
-          s_q4_start_req = 1U;
+          s_q4_case1_start_req = 1U; /* Q4-1 */
         } else if (rx == 0xD0U) {
           s_test1_start_req = 1U;
         } else if (rx == 0xD1U) {
@@ -534,6 +505,8 @@ static void App_Task_10ms(void)
           s_test3_case4_start_req = 1U;
         } else if (rx == 0xD6U) {
           s_test4_start_req = 1U;
+        } else if (rx == 0xD7U) {
+          s_test5_start_req = 1U; /* TEST5: UART6连接检测 */
         } else if (rx == 0x08U) {
           if (s_stepper_motor_inited != 0U) {
             (void)StepperMotorDrv_Enable(&s_stepper_motor);
@@ -550,15 +523,74 @@ static void App_Task_10ms(void)
             (void)StepperMotorDrv_RunPosition(&s_stepper_motor);
           }
         } else if (rx == 0x0BU) {
-          if (s_stepper_motor_inited != 0U) {
-            s_stepper_motor.pos_mode = STEPPER_POS_RELATIVE;
-            s_stepper_motor.speed = stepper_speed_turn;
-            s_stepper_motor.pulse = stepper_pulse_90deg; /* 右转90度 */
-            (void)StepperMotorDrv_RunPosition(&s_stepper_motor);
-          }
+          s_q4_start_req = 1U; /* Q4-V */
         }
         s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
       }
+    }
+  }
+
+  /* UART6：
+   * 1) 收到 AA CC 06 后回发 AA CC 06；
+   * 2) 仅 TEST5 触发发送 AA CC 05，1000ms 内需收到 AA CC 05，否则连接失败。
+   */
+  {
+    static const uint8_t k_probe_aa_cc_05[3] = {0xAAU, 0xCCU, 0x05U};
+    static const uint8_t k_ack_aa_cc_06[3] = {0xAAU, 0xCCU, 0x06U};
+    uint8_t rx6;
+    HAL_StatusTypeDef st_u6;
+
+    if (s_uart6_link_wait_resp != 0U &&
+        (int32_t)(now_ms - s_uart6_link_deadline_ms) >= 0) {
+      s_uart6_link_wait_resp = 0U;
+      if (s_uart6_test5_active != 0U) {
+        s_uart6_test5_active = 0U;
+        s_pending_beeps = 2U; /* TEST5 失败：蜂鸣2次 */
+      }
+    }
+
+    if (s_test5_start_req != 0U) {
+      s_test5_start_req = 0U;
+      st_u6 = DebugUart6_Send(k_probe_aa_cc_05, 3U, 20U);
+      if (st_u6 == HAL_OK) {
+        s_uart6_link_wait_resp = 1U;
+        s_uart6_link_deadline_ms = now_ms + 1000U;
+        s_uart6_test5_active = 1U;
+        s_uart6_test5_deadline_ms = s_uart6_link_deadline_ms;
+      } else {
+        s_uart6_test5_active = 0U;
+        s_pending_beeps = 2U; /* TEST5 发送失败：按连接失败处理 */
+      }
+    }
+
+    while (DebugUart6_ReadByte(&rx6)) {
+      if (s_uart6_rx_prev2 == 0xAAU && s_uart6_rx_prev1 == 0xCCU && rx6 == 0x06U) {
+        (void)DebugUart6_Send(k_ack_aa_cc_06, 3U, 20U);
+      }
+
+      if (s_uart6_rx_prev2 == 0xAAU && s_uart6_rx_prev1 == 0xCCU && rx6 == 0x05U) {
+        s_uart6_link_wait_resp = 0U;
+        if (s_uart6_test5_active != 0U &&
+            (int32_t)(now_ms - s_uart6_test5_deadline_ms) <= 0) {
+          s_uart6_test5_active = 0U;
+          s_pending_beeps = 1U; /* TEST5 成功：蜂鸣1次 */
+        }
+      } else if (s_uart6_rx_prev2 == 0xAAU && s_uart6_rx_prev1 == 0xCCU &&
+                 (rx6 == 0xEEU || rx6 == 0x01U || rx6 == 0x02U || rx6 == 0x03U ||
+                  rx6 == 0x04U)) {
+        if (s_q4v_uart6_wait_resp != 0U) {
+          s_q4v_uart6_resp_code = rx6;
+          s_q4v_uart6_resp_ready = 1U;
+        }
+      } else if (s_uart6_rx_prev2 == 0xAAU && s_uart6_rx_prev1 == 0xCCU && rx6 == 0xBBU) {
+        if (s_pd3_q4v_phase != 0U && s_pd3_bb_beep_done == 0U) {
+          BuzzerDrv_Beep(80U);
+          s_pd3_bb_beep_done = 1U;
+        }
+      }
+
+      s_uart6_rx_prev2 = s_uart6_rx_prev1;
+      s_uart6_rx_prev1 = rx6;
     }
   }
 
@@ -573,7 +605,7 @@ static void App_Task_100ms(void)
 #if FW_Q1_ENABLE != 0
   static uint8_t s_boot_guard_init;
   static uint32_t s_boot_guard_deadline_ms;
-  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4 */
+  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4-V,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4,14=Q4-1 */
   static uint8_t s_state;
   static uint8_t s_wait_ticks;
   static uint8_t s_round;
@@ -598,6 +630,7 @@ static void App_Task_100ms(void)
   const int32_t move_py_q1_last_m21739 = 20000; /* 0.92m * 21739 */
   const int32_t move_pz_m21739 = 0;
   const int16_t move_speed_mps100 = 3000; /* 30 m/s * 100 */
+  const int16_t move_speed_q4v_last_seg_mps100 = 1500; /* 速度15档，Q4-V末段0.92m直走 */
   const int16_t move_speed_q3_case1_uniform_mps100 = 1000; /* 10 m/s * 100 */
   const int16_t move_speed_q3_case2_uniform_mps100 = 1000; /* 10 m/s * 100 */
   const int16_t move_speed_detect_mps100 = 500; /* 5 m/s * 100，仅0.6m检测段 */
@@ -631,6 +664,7 @@ static void App_Task_100ms(void)
     s_q3_case1_start_req = 0U;
     s_q3_case2_start_req = 0U;
     s_q4_start_req = 0U;
+    s_q4_case1_start_req = 0U;
     s_test1_start_req = 0U;
     s_test2_start_req = 0U;
     s_test3_case1_start_req = 0U;
@@ -726,6 +760,20 @@ static void App_Task_100ms(void)
     s_test1_last_cross_valid = 0U;
     s_test1_last_cross_tick_ms = 0U;
     s_mode = 6U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q4_case1_start_req != 0U) {
+    s_q4_case1_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_test1_dist_measure_active = 0U;
+    s_test1_last_cross_valid = 0U;
+    s_test1_last_cross_tick_ms = 0U;
+    s_mode = 14U;
     s_state = 1U;
     s_wait_ticks = 0U;
     s_round = 0U;
@@ -837,7 +885,7 @@ static void App_Task_100ms(void)
         s_round = 0U;
         s_state = 92U;
         break;
-      } else if (s_mode == 6U) {
+      } else if (s_mode == 6U || s_mode == 14U) {
         st = DflinkChassis_SendAdaptConstPMove(0, pre_move_y_m21739, 0,
                                                move_speed_mps100, 200U);
         if (st != HAL_OK) {
@@ -1006,7 +1054,7 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 16U: /* Q4 前置前进稳定等待约 0.5s */
+    case 16U: /* Q4-V 前置前进稳定等待约 0.5s */
       if (s_wait_ticks++ < 5U) {
         return;
       }
@@ -1014,7 +1062,7 @@ static void App_Task_100ms(void)
       s_state = 17U;
       break;
 
-    case 17U: /* Q4 左转 90 度 */
+    case 17U: /* Q4-V 左转 90 度 */
       st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
@@ -1023,7 +1071,7 @@ static void App_Task_100ms(void)
       s_state = 18U;
       break;
 
-    case 18U: /* Q4 转向稳定等待约 0.5s */
+    case 18U: /* Q4-V 转向稳定等待约 0.5s */
       if (s_wait_ticks++ < 5U) {
         return;
       }
@@ -1031,17 +1079,28 @@ static void App_Task_100ms(void)
       s_state = 19U;
       break;
 
-    case 19U: /* Q4 前进 0.55m */
+    case 19U: /* Q4-V 前进 0.55m */
       st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q4_first_m21739,
                                              move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
       }
       s_wait_ticks = 0U;
-      s_state = 20U;
+      s_state = 126U;
       break;
 
-    case 20U: /* Q4 等待 4.0s */
+    case 126U: { /* Q4-V 第4步完成后：UART6 发送 AA CC 08 */
+      static const uint8_t k_q4v_uart6_aa_cc_08[3] = {0xAAU, 0xCCU, 0x08U};
+      st = DebugUart6_Send(k_q4v_uart6_aa_cc_08, 3U, 50U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 20U;
+      break;
+    }
+
+    case 20U: /* Q4-V 等待 4.0s */
       if (s_wait_ticks++ < 40U) {
         return;
       }
@@ -1049,8 +1108,8 @@ static void App_Task_100ms(void)
       s_state = 21U;
       break;
 
-    case 21U: /* Q4 再前进 0.45m */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q4_second_m21739,
+    case 21U: /* Q4-V 再前进 0.5m（6s 等待后） */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_half_m21739,
                                              move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
@@ -1059,15 +1118,15 @@ static void App_Task_100ms(void)
       s_state = 22U;
       break;
 
-    case 22U: /* Q4 第二段 0.5m 稳定等待约 2.2s */
-      if (s_wait_ticks++ < 22U) {
+    case 22U: /* Q4-V 第6步0.5m后稳定等待约 1.4s */
+      if (s_wait_ticks++ < 14U) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 23U;
       break;
 
-    case 23U: /* Q4 再左转 90 度 */
+    case 23U: /* Q4-V 再左转 90 度 */
       st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
@@ -1082,17 +1141,28 @@ static void App_Task_100ms(void)
       s_state = 24U;
       break;
 
-    case 24U: /* Q4 再次转向稳定等待约 0.5s */
+    case 24U: /* Q4-V 再次转向稳定等待约 0.5s */
       if (s_wait_ticks++ < 5U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 29U;
+      break;
+
+    case 29U: { /* Q4-V 第7步后：UART6 发送 AA CC 07 */
+      static const uint8_t k_q4v_uart6_aa_cc_07[3] = {0xAAU, 0xCCU, 0x07U};
+      st = DebugUart6_Send(k_q4v_uart6_aa_cc_07, 3U, 50U);
+      if (st != HAL_OK) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 25U;
       break;
+    }
 
-    case 25U: /* Q4 最后前进 0.92m */
+    case 25U: /* Q4-V 最后前进 0.92m（直走速度15档） */
       st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q1_last_m21739,
-                                             move_pz_m21739, move_speed_mps100, 200U);
+                                             move_pz_m21739, move_speed_q4v_last_seg_mps100, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1100,11 +1170,76 @@ static void App_Task_100ms(void)
       s_state = 26U;
       break;
 
-    case 26U: /* Q4 最后一段稳定等待约 1.8s 后停车 */
-      if (s_wait_ticks++ < 18U) {
+    case 26U: /* Q4-V 第8步直走后稳定等待约 3.0s */
+      if (s_wait_ticks++ < 30U) {
         return;
       }
+      if (s_mode == 14U) {
+        s_wait_ticks = 0U;
+        s_state = 122U; /* Q4-1: Q4-V后接TEST3-2 */
+        break;
+      }
+      if (s_mode == 6U) {
+        s_wait_ticks = 0U;
+        s_state = 27U;
+        break;
+      }
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
+    case 27U: { /* Q4-V 发送 UART6 查询帧 AA CC 00 */
+      static const uint8_t k_q4v_query_aa_cc_00[3] = {0xAAU, 0xCCU, 0x00U};
+      st = DebugUart6_Send(k_q4v_query_aa_cc_00, 3U, 50U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_q4v_uart6_wait_resp = 1U;
+      s_q4v_uart6_resp_ready = 0U;
+      s_q4v_uart6_resp_code = 0U;
+      s_wait_ticks = 0U;
+      s_state = 28U;
+      break;
+    }
+
+    case 28U: /* Q4-V 等待 UART6 决策帧 AA CC XX */
+      if (s_q4v_uart6_resp_ready == 0U) {
+        return;
+      }
+
+      s_q4v_uart6_wait_resp = 0U;
+      s_q4v_uart6_resp_ready = 0U;
+
+      if (s_q4v_uart6_resp_code == 0xEEU) {
+        App_Motion_StopNoBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+        s_pending_beeps = 3U; /* 连续触发3次 */
+        break;
+      }
+
+      s_q3_case1_cross_detect_active = 0U;
+      s_q3_case1_cross_count = 0U;
+      s_q3_case1_cross_latched = 0U;
+      s_test1_dist_measure_active = 0U;
+      s_test1_last_cross_valid = 0U;
+      s_test1_last_cross_tick_ms = 0U;
+      s_wait_ticks = 0U;
+      s_round = 0U;
+      s_ret_seg = 0U;
+
+      if (s_q4v_uart6_resp_code == 0x01U) {      /* AA CC 01 -> TEST3-4 */
+        s_mode = 12U;
+        s_state = 82U;
+      } else if (s_q4v_uart6_resp_code == 0x02U) { /* AA CC 02 -> TEST3-1 */
+        s_mode = 9U;
+        s_state = 70U;
+      } else if (s_q4v_uart6_resp_code == 0x03U) { /* AA CC 03 -> TEST3-3 */
+        s_mode = 11U;
+        s_state = 78U;
+      } else if (s_q4v_uart6_resp_code == 0x04U) { /* AA CC 04 -> TEST3-2 */
+        s_mode = 10U;
+        s_state = 74U;
+      } else {
+        App_Motion_StopNoBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      }
       break;
 
     case 30U: /* TEST1: 0.2m前先做灰度偏移修正 */
@@ -1590,6 +1725,40 @@ static void App_Task_100ms(void)
       break;
 
     case 91U: /* TEST4: 后退稳定等待后停车 */
+      if (s_wait_ticks++ < wait_ticks_default) {
+        return;
+      }
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
+    case 122U: /* Q4-1: 接续 TEST3-2 左转 116.5 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_1165, rot_vmax, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 123U;
+      break;
+
+    case 123U: /* Q4-1: 转向稳定等待 */
+      if (s_wait_ticks++ < 5U) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 124U;
+      break;
+
+    case 124U: /* Q4-1: 接续 TEST3-2 前进 0.745m */
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_test3_case2_m21739,
+                                             move_pz_m21739, move_speed_mps100, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 125U;
+      break;
+
+    case 125U: /* Q4-1: 稳定等待后停车 */
       if (s_wait_ticks++ < wait_ticks_default) {
         return;
       }

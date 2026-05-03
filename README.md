@@ -97,7 +97,7 @@ bool SampleGrayDigital(void)
 - **路口检测与测距**：
   - 灰度检测频率 100Hz（`App_Task_10ms`）
   - 含连续帧确认滤波（时间层）
-  - 测距结果支持 `CROSS` / `DIST` 输出，并在测距段结束后统一发送
+  - 测距段结束后仅通过 **`UART4` 蓝牙** 发送 `l1` / `l2`（`USART1` 无 `CROSS`/`DIST` 文本）
 - **蓝牙距离上报（UART4）**：
   - 测距段结束后向蓝牙发送两行：`l1 = ...cm`、`l2 = ...cm`
   - 缺失项默认发送 `2.5cm`
@@ -105,7 +105,7 @@ bool SampleGrayDigital(void)
 
 ## 串口与通信说明
 
-- `USART1`：任务指令与调试输出（`DebugUart`）。
+- `USART1`：任务指令（`DebugUart`，`AA BB XX`）。
 - `UART4`：蓝牙模块数据发送（测距结果 `l1/l2`）。
 - `UART5`：底盘 DFLink 通信。
 - `USART2`：步进电机驱动串口。
