@@ -9,3 +9,8 @@ MDK-ARM/*.bak
 Thumbs.db
 .vscode/
 .idea/
+
+# analysis: local captures / generated plots (keep scripts in repo)
+analysis/data.txt
+analysis/*.png
+analysis/__pycache__/

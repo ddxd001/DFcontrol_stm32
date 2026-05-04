@@ -92,21 +92,23 @@ bool SampleGrayDigital(void)
 
 ## 当前功能概览（与代码对齐）
 
-- **USART1 指令触发**：`AA BB XX` 协议触发 Q1~Q4、TEST1~TEST4、步进电机控制等。
+- **USART1 指令触发**：`AA BB XX` 协议触发 Q1~Q4、TEST1~TEST7（含 TEST5~7）、**TEST1-REC（`DA`）**、步进电机控制等。
 - **底盘运动控制**：通过 `UART5 + DFLink` 下发自适应位移、匀速位移、转向、锁头等控制指令。
 - **路口检测与测距**：
   - 灰度检测频率 100Hz（`App_Task_10ms`）
   - 含连续帧确认滤波（时间层）
-  - 测距段结束后仅通过 **`UART4` 蓝牙** 发送 `l1` / `l2`（`USART1` 无 `CROSS`/`DIST` 文本）
+  - 测距段结束后仅通过 **`UART4` 蓝牙** 发送 `l1` / `l2`（`USART1` 无 `CROSS`/`DIST` 文本）；**TEST6（`D8`）** 诊断也同样经 **`UART4`** 输出。
 - **蓝牙距离上报（UART4）**：
   - 测距段结束后向蓝牙发送两行：`l1 = ...cm`、`l2 = ...cm`
+  - 灰度看门狗判离线（I2C `Ping` 连续失败）时发送一行：`GRAY:OFF`（带 `\r\n`）
+  - **TEST6**：`T6 ...` 周期性诊断行（`AA BB D8`，`\r\n` 起行，详见 `UART_COMMAND_TASKS.md` §7.1）
   - 缺失项默认发送 `2.5cm`
 - **步进电机（USART2）**：支持使能/失能与 90° 相对转动。
 
 ## 串口与通信说明
 
 - `USART1`：任务指令（`DebugUart`，`AA BB XX`）。
-- `UART4`：蓝牙模块数据发送（测距结果 `l1/l2`）。
+- `UART4`：蓝牙模块数据发送（测距结果 `l1/l2`；灰度离线告警 `GRAY:OFF`）。
 - `UART5`：底盘 DFLink 通信。
 - `USART2`：步进电机驱动串口。
 
@@ -116,7 +118,7 @@ bool SampleGrayDigital(void)
 
 - 详细指令与动作流程请查看：`Firmware/App/UART_COMMAND_TASKS.md`
 - 该文档与 `Firmware/App/app_tasks.c` 同步维护，包含：
-  - 指令总表（`AA BB 01/02/.../D6`）
+  - 指令总表（`AA BB 01/02/.../D9`）
   - Q/TEST 动作步骤与关键参数
   - 测距公式、滤波参数、蓝牙发送格式
 

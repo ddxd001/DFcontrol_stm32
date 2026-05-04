@@ -8,6 +8,7 @@
 #include "dflink_chassis_motion.h"
 #include "fw_config.h"
 #include "gw_gray_sensor.h"
+#include "i2c.h"
 #include "stepper_motor_drv.h"
 #include "usart.h"
 
@@ -19,6 +20,7 @@ static uint8_t s_q3_case2_start_req;
 static uint8_t s_q4_start_req;
 static uint8_t s_q4_case1_start_req;
 static uint8_t s_test1_start_req;
+static uint8_t s_test1_rec_start_req;
 static uint8_t s_test2_start_req;
 static uint8_t s_test3_case1_start_req;
 static uint8_t s_test3_case2_start_req;
@@ -26,6 +28,9 @@ static uint8_t s_test3_case3_start_req;
 static uint8_t s_test3_case4_start_req;
 static uint8_t s_test4_start_req;
 static uint8_t s_test5_start_req;
+static uint8_t s_test6_start_req;
+static uint8_t s_test7_active;
+static uint8_t s_test7_prev_raw_cross;
 static uint8_t s_q4v_uart6_wait_resp;
 static uint8_t s_q4v_uart6_resp_ready;
 static uint8_t s_q4v_uart6_resp_code;
@@ -51,15 +56,219 @@ static uint8_t s_cross_confirmed;
 static int32_t s_measure_corr_rz10000;
 #define APP_MEAS_LOG_MAX 16U
 #define APP_MEAS_EXPECT_CROSS_COUNT 3U
-#define APP_CROSS_ON_CONFIRM_FRAMES 7U
-#define APP_CROSS_OFF_CONFIRM_FRAMES 4U
+#define APP_CROSS_ON_CONFIRM_FRAMES   4U /* 原为 7；越低越多误触发风险 */
+#define APP_CROSS_OFF_CONFIRM_FRAMES  3U /* 原为 4 */
 #define APP_DIST_CM_X10_MIN 10U  /* 1.0cm */
 #define APP_DIST_CM_X10_MAX 50U  /* 5.0cm */
 static uint8_t s_meas_log_cross_idx[APP_MEAS_LOG_MAX];
 static uint32_t s_meas_log_dist_x10[APP_MEAS_LOG_MAX];
 static uint8_t s_meas_log_has_dist[APP_MEAS_LOG_MAX];
 static uint8_t s_meas_log_count;
+/* TEST1-REC：检测窗内仅采样 digital_inv + tick，段结束后离线debounce 与 TEST1 相同再算 l1/l2 */
+#define APP_TEST1_REC_MAX 320U
+static uint8_t s_test1_rec_buf_inv[APP_TEST1_REC_MAX];
+static uint32_t s_test1_rec_buf_tick[APP_TEST1_REC_MAX];
+static uint16_t s_test1_rec_count;
+static uint8_t s_test1_rec_active;
 #define APP_GRAY_CROSS_MIN_ACTIVE_BITS 3U
+#define APP_GRAY_WATCHDOG_FAIL_TICKS 5U /* 连续 Ping 失败次数后认为灰度离线 */
+
+static void App_SendBtGrayOffline(void)
+{
+  static const uint8_t k_gray_off[] =
+      {'\r', '\n', 'G', 'R', 'A', 'Y', ':', 'O', 'F', 'F', '\r', '\n'};
+  (void)HAL_UART_Transmit(&huart4, (uint8_t *)k_gray_off,
+                          (uint16_t)(sizeof(k_gray_off) / sizeof(k_gray_off[0])), 50U);
+}
+
+static void App_GraySensorWatchdog10Hz(void)
+{
+  static uint8_t s_gray_ping_fail_cnt;
+  uint8_t was_online;
+
+  was_online = s_gray_sensor_inited;
+
+  if (GwGray_Ping(&s_gray_sensor)) {
+    s_gray_ping_fail_cnt = 0U;
+    s_gray_sensor_inited = 1U;
+  } else {
+    if (s_gray_ping_fail_cnt < 255U) {
+      s_gray_ping_fail_cnt++;
+    }
+    if (s_gray_ping_fail_cnt >= APP_GRAY_WATCHDOG_FAIL_TICKS) {
+      s_gray_sensor_inited = 0U;
+      if (was_online != 0U) {
+        App_SendBtGrayOffline();
+      }
+    }
+  }
+}
+
+#define APP_TEST6_REPORT_INTERVAL_TICKS 10U /* 1 Hz @ App_Task_100ms */
+#define APP_TEST6_REPORT_SAMPLES 120U        /* 共 120 秒采样便于拔插灰度观测 */
+
+static uint8_t s_test6_active;
+static uint8_t s_test6_tick_div;
+static uint16_t s_test6_samples_remain;
+static uint8_t s_test6_boot_guard_init;
+static uint32_t s_test6_boot_deadline_ms;
+
+static uint8_t App_Test6_AppendU32Dec(uint8_t *msg, uint8_t n, uint32_t v)
+{
+  uint8_t digits[10];
+  uint8_t dlen;
+  uint8_t i;
+
+  if (v == 0U) {
+    msg[n++] = '0';
+    return n;
+  }
+  dlen = 0U;
+  while (v > 0U && dlen < (uint8_t)sizeof(digits)) {
+    digits[dlen++] = (uint8_t)(v % 10U);
+    v /= 10U;
+  }
+  for (i = 0U; i < dlen; i++) {
+    msg[n++] = (uint8_t)('0' + digits[dlen - 1U - i]);
+  }
+  return n;
+}
+
+static uint8_t App_Test6_AppendHexU8(uint8_t *msg, uint8_t n, uint8_t v)
+{
+  static const char k_hex[] = "0123456789ABCDEF";
+
+  msg[n++] = (uint8_t)k_hex[(v >> 4) & 0x0FU];
+  msg[n++] = (uint8_t)k_hex[v & 0x0FU];
+  return n;
+}
+
+static void App_Test6EmitSample(void)
+{
+  uint8_t msg[96];
+  uint8_t n;
+  uint32_t tick_ms;
+  uint32_t i2c_err0;
+  uint32_t i2c_state_u;
+  bool ping_ok;
+  bool dig_ok;
+  uint8_t inited_shadow;
+  uint32_t i2c_err1;
+  uint8_t di;
+
+  tick_ms = HAL_GetTick();
+  i2c_err0 = HAL_I2C_GetError(&hi2c1);
+  i2c_state_u = (uint32_t)hi2c1.State;
+  inited_shadow = s_gray_sensor_inited;
+  ping_ok = GwGray_Ping(&s_gray_sensor);
+  dig_ok = GwGray_ReadDigitalUpdate(&s_gray_sensor);
+  i2c_err1 = HAL_I2C_GetError(&hi2c1);
+  di = s_gray_sensor.digital_inv;
+
+  n = 0U;
+  msg[n++] = '\r';
+  msg[n++] = '\n';
+  msg[n++] = 'T';
+  msg[n++] = '6';
+  msg[n++] = ' ';
+  msg[n++] = 'm';
+  msg[n++] = 's';
+  msg[n++] = '=';
+  n = App_Test6_AppendU32Dec(msg, n, tick_ms);
+  msg[n++] = ' ';
+  msg[n++] = 'i';
+  msg[n++] = 'n';
+  msg[n++] = 'i';
+  msg[n++] = 't';
+  msg[n++] = '=';
+  msg[n++] = (uint8_t)('0' + (uint8_t)(inited_shadow != 0U ? 1 : 0));
+  msg[n++] = ' ';
+  msg[n++] = 'p';
+  msg[n++] = 'n';
+  msg[n++] = 'g';
+  msg[n++] = '=';
+  msg[n++] = (uint8_t)('0' + (uint8_t)(ping_ok ? 1 : 0));
+  msg[n++] = ' ';
+  msg[n++] = 'd';
+  msg[n++] = 'g';
+  msg[n++] = '=';
+  msg[n++] = (uint8_t)('0' + (uint8_t)(dig_ok ? 1 : 0));
+  msg[n++] = ' ';
+  msg[n++] = 's';
+  msg[n++] = 't';
+  msg[n++] = '=';
+  n = App_Test6_AppendHexU8(msg, n, (uint8_t)(i2c_state_u & 0xFFU));
+  msg[n++] = ' ';
+  msg[n++] = 'e';
+  msg[n++] = '0';
+  msg[n++] = '=';
+  n = App_Test6_AppendHexU8(msg, n, (uint8_t)(i2c_err0 & 0xFFU));
+  msg[n++] = ' ';
+  msg[n++] = 'e';
+  msg[n++] = '1';
+  msg[n++] = '=';
+  n = App_Test6_AppendHexU8(msg, n, (uint8_t)(i2c_err1 & 0xFFU));
+  msg[n++] = ' ';
+  msg[n++] = 'd';
+  msg[n++] = 'i';
+  msg[n++] = '=';
+  n = App_Test6_AppendHexU8(msg, n, di);
+  msg[n++] = '\r';
+  msg[n++] = '\n';
+  (void)HAL_UART_Transmit(&huart4, msg, n, 50U);
+}
+
+static void App_Test6_Process100ms(uint32_t now_ms)
+{
+  static const char k_banner[] =
+      "\r\nTEST6:start 120s@1Hz UART4 init=inited-flag png dg "
+      "st=i2cs e0=HALerr0 e1=HALerr1 di=digital_inv\r\n";
+
+  if (s_test6_boot_guard_init == 0U) {
+    s_test6_boot_guard_init = 1U;
+    s_test6_boot_deadline_ms = now_ms + 1200U;
+  }
+  if ((int32_t)(now_ms - s_test6_boot_deadline_ms) < 0) {
+    s_test6_start_req = 0U;
+    s_test6_active = 0U;
+    return;
+  }
+
+  if (s_test6_start_req != 0U) {
+    s_test6_start_req = 0U;
+    s_test6_active = 1U;
+    s_test6_tick_div = 0U;
+    s_test6_samples_remain = APP_TEST6_REPORT_SAMPLES;
+    BuzzerDrv_Beep(80U);
+    (void)HAL_UART_Transmit(&huart4, (uint8_t *)k_banner,
+                            (uint16_t)(sizeof(k_banner) - 1U), 50U);
+    App_Test6EmitSample();
+    if (s_test6_samples_remain > 0U) {
+      s_test6_samples_remain--;
+    }
+    if (s_test6_samples_remain == 0U) {
+      s_test6_active = 0U;
+    }
+    return;
+  }
+
+  if (s_test6_active == 0U) {
+    return;
+  }
+
+  if (s_test6_tick_div + 1U < APP_TEST6_REPORT_INTERVAL_TICKS) {
+    s_test6_tick_div++;
+    return;
+  }
+  s_test6_tick_div = 0U;
+  App_Test6EmitSample();
+  if (s_test6_samples_remain > 0U) {
+    s_test6_samples_remain--;
+  }
+  if (s_test6_samples_remain == 0U) {
+    s_test6_active = 0U;
+  }
+}
 
 static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_ticks,
                                    uint8_t *round, uint8_t *ret_seg)
@@ -76,6 +285,7 @@ static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_
   s_cross_confirmed = 0U;
   s_measure_corr_rz10000 = 0;
   s_meas_log_count = 0U;
+  s_test1_rec_active = 0U;
   s_q4v_uart6_wait_resp = 0U;
   s_q4v_uart6_resp_ready = 0U;
   s_q4v_uart6_resp_code = 0U;
@@ -100,6 +310,7 @@ static void App_Motion_StopNoBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_t
   s_cross_confirmed = 0U;
   s_measure_corr_rz10000 = 0;
   s_meas_log_count = 0U;
+  s_test1_rec_active = 0U;
   s_q4v_uart6_wait_resp = 0U;
   s_q4v_uart6_resp_ready = 0U;
   s_q4v_uart6_resp_code = 0U;
@@ -203,6 +414,213 @@ static void App_FlushMeasureLogs(void)
 static void App_ClearMeasureLogs(void)
 {
   s_meas_log_count = 0U;
+}
+
+static void App_ProcessTest1RecSample10ms(void)
+{
+  if (s_test1_rec_active == 0U || s_gray_sensor_inited == 0U) {
+    return;
+  }
+  if (s_test1_rec_count >= APP_TEST1_REC_MAX) {
+    return;
+  }
+  if (!GwGray_ReadDigitalUpdate(&s_gray_sensor)) {
+    return;
+  }
+  s_test1_rec_buf_inv[s_test1_rec_count] = s_gray_sensor.digital_inv;
+  s_test1_rec_buf_tick[s_test1_rec_count] = HAL_GetTick();
+  s_test1_rec_count++;
+}
+
+/* 段结束后对缓冲跑一次与 App_ProcessCrossDetect10ms 等价的 debounce，再填 s_meas_log_* */
+static void App_AnalyzeTest1RecBuffer(void)
+{
+  uint16_t i;
+  uint8_t on_cnt;
+  uint8_t off_cnt;
+  uint8_t confirmed;
+  uint8_t latched;
+  uint8_t cross_n;
+  uint32_t ticks[APP_MEAS_EXPECT_CROSS_COUNT];
+  bool raw_cross;
+
+  on_cnt = 0U;
+  off_cnt = 0U;
+  confirmed = 0U;
+  latched = 0U;
+  cross_n = 0U;
+
+  for (i = 0U; i < s_test1_rec_count; i++) {
+    raw_cross = GwGray_IsCrossByDigitalInv(s_test1_rec_buf_inv[i], APP_GRAY_CROSS_MIN_ACTIVE_BITS);
+    if (raw_cross) {
+      if (on_cnt < 255U) {
+        on_cnt++;
+      }
+      off_cnt = 0U;
+      if (confirmed == 0U && on_cnt >= APP_CROSS_ON_CONFIRM_FRAMES) {
+        confirmed = 1U;
+      }
+    } else {
+      if (off_cnt < 255U) {
+        off_cnt++;
+      }
+      on_cnt = 0U;
+      if (confirmed != 0U && off_cnt >= APP_CROSS_OFF_CONFIRM_FRAMES) {
+        confirmed = 0U;
+      }
+    }
+
+    if (confirmed != 0U) {
+      if (latched == 0U) {
+        if (cross_n < APP_MEAS_EXPECT_CROSS_COUNT) {
+          ticks[cross_n] = s_test1_rec_buf_tick[i];
+          cross_n++;
+        }
+        latched = 1U;
+        if (cross_n >= APP_MEAS_EXPECT_CROSS_COUNT) {
+          break;
+        }
+      }
+    } else {
+      latched = 0U;
+    }
+  }
+
+  App_ClearMeasureLogs();
+  for (i = 0U; i < cross_n; i++) {
+    uint8_t slot;
+    uint32_t dt_ms;
+    uint32_t dist_cm_x10;
+
+    slot = s_meas_log_count;
+    if (slot >= APP_MEAS_LOG_MAX) {
+      break;
+    }
+    s_meas_log_cross_idx[slot] = (uint8_t)(i + 1U);
+    s_meas_log_has_dist[slot] = 0U;
+    if (i >= 1U) {
+      dt_ms = ticks[i] - ticks[i - 1U];
+      dist_cm_x10 = (dt_ms * 1197U + 5000U) / 10000U;
+      if (dist_cm_x10 < APP_DIST_CM_X10_MIN) {
+        dist_cm_x10 = APP_DIST_CM_X10_MIN;
+      } else if (dist_cm_x10 > APP_DIST_CM_X10_MAX) {
+        dist_cm_x10 = APP_DIST_CM_X10_MAX;
+      }
+      s_meas_log_dist_x10[slot] = dist_cm_x10;
+      s_meas_log_has_dist[slot] = 1U;
+    }
+    s_meas_log_count++;
+  }
+}
+
+/* VOFA+ FireWater：prefix:ch0,ch1,... 每行 \r\n 结尾（数值通道便于上位机绘图） */
+static uint8_t App_MsgAppendDecU32(uint8_t *msg, uint8_t n, uint32_t v)
+{
+  uint8_t d[10];
+  uint8_t k;
+  uint8_t j;
+
+  if (v == 0U) {
+    msg[n++] = '0';
+    return n;
+  }
+  k = 0U;
+  while (v > 0U && k < (uint8_t)sizeof(d)) {
+    d[k++] = (uint8_t)('0' + (v % 10U));
+    v /= 10U;
+  }
+  for (j = k; j > 0U; j--) {
+    msg[n++] = d[j - 1U];
+  }
+  return n;
+}
+
+static void App_Test1Rec_SendFireWaterUsart1(void)
+{
+  uint8_t line[56];
+  uint8_t n;
+  uint16_t i;
+  uint16_t j;
+  static const uint8_t k_meta_hdr[] = {'t','1','r','_','m',':'};
+  static const uint8_t k_row_hdr[] = {'t','1','r',':'};
+
+  n = 0U;
+  for (j = 0U; j < (uint16_t)(sizeof(k_meta_hdr) / sizeof(k_meta_hdr[0])); j++) {
+    line[n++] = k_meta_hdr[j];
+  }
+  n = App_MsgAppendDecU32(line, n, (uint32_t)s_test1_rec_count);
+  line[n++] = '\r';
+  line[n++] = '\n';
+  (void)DebugUart_Send(line, n, 50U);
+
+  for (i = 0U; i < s_test1_rec_count; i++) {
+    uint32_t tick;
+    uint8_t inv;
+
+    n = 0U;
+    for (j = 0U; j < (uint16_t)(sizeof(k_row_hdr) / sizeof(k_row_hdr[0])); j++) {
+      line[n++] = k_row_hdr[j];
+    }
+    n = App_MsgAppendDecU32(line, n, (uint32_t)i);
+    line[n++] = ',';
+    tick = s_test1_rec_buf_tick[i];
+    n = App_MsgAppendDecU32(line, n, tick);
+    line[n++] = ',';
+    inv = s_test1_rec_buf_inv[i];
+    n = App_MsgAppendDecU32(line, n, (uint32_t)inv);
+    line[n++] = '\r';
+    line[n++] = '\n';
+    (void)DebugUart_Send(line, n, 50U);
+  }
+}
+
+/* TEST1-GYCK：Ping + 读数字量；成功蜂鸣 1 次，失败队列蜂鸣 2 次（PD4 或 AA BB DB） */
+static void App_Test1Gyck_CheckAndBeep(void)
+{
+  bool ok;
+
+  ok = GwGray_Ping(&s_gray_sensor);
+  if (ok != false) {
+    ok = GwGray_ReadDigitalUpdate(&s_gray_sensor);
+  }
+  if (ok != false) {
+    BuzzerDrv_Beep(80U);
+  } else {
+    s_pending_beeps = 2U;
+  }
+}
+
+static void App_Test7_UserToggle(void)
+{
+  s_test7_active ^= 1U;
+  s_test7_prev_raw_cross = 0U;
+  if (s_test7_active != 0U) {
+    BuzzerDrv_Beep(80U);
+  }
+}
+
+static void App_Test7_Process10ms(void)
+{
+  bool is_cross;
+  bool read_ok;
+
+  if (s_test7_active == 0U) {
+    return;
+  }
+
+  if (s_gray_sensor_inited == 0U) {
+    return;
+  }
+
+  read_ok = GwGray_ReadAndDetectCross(&s_gray_sensor, APP_GRAY_CROSS_MIN_ACTIVE_BITS, &is_cross);
+  if (!read_ok) {
+    return;
+  }
+
+  if (is_cross && s_test7_prev_raw_cross == 0U) {
+    BuzzerDrv_Beep(80U);
+  }
+  s_test7_prev_raw_cross = (is_cross != false) ? 1U : 0U;
 }
 
 static void App_ProcessCrossDetect10ms(void)
@@ -393,8 +811,12 @@ static void App_Task_10ms(void)
     s_q3_case2_start_req = 0U;
     s_q4_start_req = 0U;
     s_test1_start_req = 0U;
+    s_test1_rec_start_req = 0U;
     s_test2_start_req = 0U;
     s_test5_start_req = 0U;
+    s_test6_start_req = 0U;
+    s_test7_active = 0U;
+    s_test7_prev_raw_cross = 0U;
     s_pd3_q4v_phase = 0U;
     s_pd3_bb_beep_done = 0U;
     s_heading_lock_init_done = 0U;
@@ -410,17 +832,7 @@ static void App_Task_10ms(void)
       s_pd3_q4v_phase = 0U;
     }
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
-    if (s_stepper_motor_inited != 0U) {
-      HAL_StatusTypeDef st_stepper;
-      uint8_t next_enable;
-      next_enable = (s_stepper_motor_enabled == 0U) ? 1U : 0U;
-      st_stepper = next_enable ? StepperMotorDrv_Enable(&s_stepper_motor)
-                               : StepperMotorDrv_Disable(&s_stepper_motor);
-      if (st_stepper == HAL_OK) {
-        s_stepper_motor_enabled = next_enable;
-        BuzzerDrv_Beep(80U);
-      }
-    }
+    App_Test1Gyck_CheckAndBeep();
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD5)) {
     HAL_StatusTypeDef st_lock;
     uint8_t next_lock;
@@ -458,7 +870,10 @@ static void App_Task_10ms(void)
     s_beep_stage = 0U;
   }
 
+  App_ProcessTest1RecSample10ms();
   App_ProcessCrossDetect10ms();
+
+  App_Test7_Process10ms();
 
   if (ChassisUartBridge_IsPassthrough()) {
     return;
@@ -493,6 +908,10 @@ static void App_Task_10ms(void)
           s_q4_case1_start_req = 1U; /* Q4-1 */
         } else if (rx == 0xD0U) {
           s_test1_start_req = 1U;
+        } else if (rx == 0xDAU) {
+          s_test1_rec_start_req = 1U; /* TEST1-REC：先采样后离线算距 */
+        } else if (rx == 0xDBU) {
+          App_Test1Gyck_CheckAndBeep(); /* TEST1-GYCK：灰度可读性，同 PD4 */
         } else if (rx == 0xD1U) {
           s_test2_start_req = 1U;
         } else if (rx == 0xD2U) {
@@ -507,6 +926,10 @@ static void App_Task_10ms(void)
           s_test4_start_req = 1U;
         } else if (rx == 0xD7U) {
           s_test5_start_req = 1U; /* TEST5: UART6连接检测 */
+        } else if (rx == 0xD8U) {
+          s_test6_start_req = 1U; /* TEST6: 灰度 I2C 诊断 */
+        } else if (rx == 0xD9U) {
+          App_Test7_UserToggle();
         } else if (rx == 0x08U) {
           if (s_stepper_motor_inited != 0U) {
             (void)StepperMotorDrv_Enable(&s_stepper_motor);
@@ -602,15 +1025,22 @@ static void App_Task_50ms(void)
 
 static void App_Task_100ms(void)
 {
+  uint32_t now_ms;
+
+  /* 10 Hz：与调度 100ms 节拍一致，巡检 I2C Ping 判断灰度是否在线 */
+  App_GraySensorWatchdog10Hz();
+
+  now_ms = HAL_GetTick();
+  App_Test6_Process100ms(now_ms);
+
 #if FW_Q1_ENABLE != 0
   static uint8_t s_boot_guard_init;
   static uint32_t s_boot_guard_deadline_ms;
-  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4-V,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4,14=Q4-1 */
+  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4-V,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4,14=Q4-1,15=TEST1-REC */
   static uint8_t s_state;
   static uint8_t s_wait_ticks;
   static uint8_t s_round;
   static uint8_t s_ret_seg;
-  uint32_t now_ms;
   HAL_StatusTypeDef st;
 
   const int32_t pre_move_y_m21739 = 1739; /* 0.08m * 21739 */
@@ -651,7 +1081,6 @@ static void App_Task_100ms(void)
   const uint8_t wait_ticks_pre_detect = 6U;        /* 0.6s，校准直行后进入测量段前等待 */
   const uint8_t wait_ticks_q3_case1_uniform = 28U; /* 2.8s */
 
-  now_ms = HAL_GetTick();
   if (s_boot_guard_init == 0U) {
     s_boot_guard_init = 1U;
     s_boot_guard_deadline_ms = now_ms + 1200U;
@@ -666,12 +1095,16 @@ static void App_Task_100ms(void)
     s_q4_start_req = 0U;
     s_q4_case1_start_req = 0U;
     s_test1_start_req = 0U;
+    s_test1_rec_start_req = 0U;
     s_test2_start_req = 0U;
     s_test3_case1_start_req = 0U;
     s_test3_case2_start_req = 0U;
     s_test3_case3_start_req = 0U;
     s_test3_case4_start_req = 0U;
     s_test4_start_req = 0U;
+    s_test6_start_req = 0U;
+    s_test7_active = 0U;
+    s_test7_prev_raw_cross = 0U;
     s_mode = 0U;
     s_state = 0U;
     s_wait_ticks = 0U;
@@ -775,6 +1208,22 @@ static void App_Task_100ms(void)
     s_test1_last_cross_tick_ms = 0U;
     s_mode = 14U;
     s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_test1_rec_start_req != 0U) {
+    s_test1_rec_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_test1_dist_measure_active = 0U;
+    s_test1_last_cross_valid = 0U;
+    s_test1_last_cross_tick_ms = 0U;
+    s_test1_rec_active = 0U;
+    s_test1_rec_count = 0U;
+    s_mode = 15U;
+    s_state = 30U;
     s_wait_ticks = 0U;
     s_round = 0U;
     s_ret_seg = 0U;
@@ -1256,8 +1705,8 @@ static void App_Task_100ms(void)
       s_state = 43U;
       break;
 
-    case 42U: /* TEST1: 修正转向稳定等待 */
-      if (s_wait_ticks++ < 5U) {
+    case 42U: /* TEST1: 修正转向稳定等待（与 Q3-1 替换段 case 59 一致：0.3s） */
+      if (s_wait_ticks++ < 3U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -1296,8 +1745,8 @@ static void App_Task_100ms(void)
       s_state = 45U;
       break;
 
-    case 45U: /* TEST1: 反向转回稳定等待 */
-      if (s_wait_ticks++ < 3U) {
+    case 45U: /* TEST1: 反向转回稳定等待（与 Q3-1 替换段 case 62 一致：0.2s） */
+      if (s_wait_ticks++ < 2U) {
         return;
       }
       s_wait_ticks = 0U;
@@ -1310,15 +1759,20 @@ static void App_Task_100ms(void)
       s_state = 33U;
       break;
 
-    case 33U: /* TEST1: 匀速前进 0.4m，开启路口检测 */
+    case 33U: /* TEST1 / TEST1-REC: 匀速前进 0.4m；REC 仅采样，段末离线算距 */
       App_ClearMeasureLogs();
-      s_q3_case1_cross_detect_active = 1U;
+      if (s_mode == 15U) {
+        s_q3_case1_cross_detect_active = 0U;
+        s_test1_dist_measure_active = 0U;
+      } else {
+        s_q3_case1_cross_detect_active = 1U;
+        s_test1_dist_measure_active = 1U;
+      }
       s_q3_case1_cross_count = 0U;
       s_q3_case1_cross_latched = 0U;
       s_cross_raw_on_cnt = 0U;
       s_cross_raw_off_cnt = 0U;
       s_cross_confirmed = 0U;
-      s_test1_dist_measure_active = 1U;
       s_test1_last_cross_valid = 0U;
       s_test1_last_cross_tick_ms = 0U;
       st = DflinkChassis_SendVelDisplacement(move_px_m21739, move_py_test1_04_m21739,
@@ -1326,6 +1780,10 @@ static void App_Task_100ms(void)
                                              200U);
       if (st != HAL_OK) {
         return;
+      }
+      if (s_mode == 15U) {
+        s_test1_rec_active = 1U;
+        s_test1_rec_count = 0U;
       }
       s_wait_ticks = 0U;
       s_state = 34U;
@@ -1354,7 +1812,12 @@ static void App_Task_100ms(void)
       s_state = 37U;
       break;
 
-    case 37U: /* TEST1: 自适应前进 0.4m */
+    case 37U: /* TEST1 / TEST1-REC: 自适应前进 0.4m */
+      if (s_mode == 15U) {
+        s_test1_rec_active = 0U;
+        App_Test1Rec_SendFireWaterUsart1();
+        App_AnalyzeTest1RecBuffer();
+      }
       App_FlushMeasureLogs();
       s_q3_case1_cross_detect_active = 0U;
       s_q3_case1_cross_count = 0U;
@@ -1896,6 +2359,8 @@ void App_RegisterTasks(void)
   s_stepper_motor_enabled = 0U;
   GwGraySensor_InitDefaults(&s_gray_sensor, &hi2c1);
   s_gray_sensor_inited = GwGraySensor_InitPingWait(&s_gray_sensor, 300U) ? 1U : 0U;
+  s_test7_active = 0U;
+  s_test7_prev_raw_cross = 0U;
   s_q3_case1_cross_detect_active = 0U;
   s_q3_case1_cross_count = 0U;
   s_q3_case1_cross_latched = 0U;
