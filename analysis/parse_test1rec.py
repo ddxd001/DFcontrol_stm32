@@ -28,13 +28,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-# 与 app_tasks.c 一致
+# 与 fw_config.h：M=dt_ms*0.15，D(cm)=0.106986*M-1.633710；dist_cm_x10=round(10*D)
 CROSS_ON_CONFIRM_FRAMES = 4
 CROSS_OFF_CONFIRM_FRAMES = 3
 GRAY_CROSS_MIN_ACTIVE_BITS = 3
 EXPECT_CROSS_COUNT = 3
-DIST_CM_X10_MIN = 10   # 1.0 cm
-DIST_CM_X10_MAX = 50   # 5.0 cm
 
 
 def popcount8(v: int) -> int:
@@ -47,13 +45,11 @@ def is_cross_by_inv(digital_inv: int) -> bool:
 
 def dist_cm_x10_from_dt_ms(dt_ms: int) -> int:
     if dt_ms <= 0:
-        return DIST_CM_X10_MIN
-    d = (dt_ms * 1197 + 5000) // 10000
-    if d < DIST_CM_X10_MIN:
-        return DIST_CM_X10_MIN
-    if d > DIST_CM_X10_MAX:
-        return DIST_CM_X10_MAX
-    return d
+        return 0
+    n = 160479 * dt_ms - 16337100
+    if n <= 0:
+        return 0
+    return (n + 500000) // 1000000
 
 
 @dataclass

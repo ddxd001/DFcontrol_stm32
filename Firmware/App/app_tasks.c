@@ -1,6 +1,8 @@
 #include "app_tasks.h"
 #include "scheduler.h"
 
+#include <stdint.h>
+
 #include "buzzer_drv.h"
 #include "button_drv.h"
 #include "chassis_uart_bridge.h"
@@ -19,6 +21,9 @@ static uint8_t s_q3_case1_start_req;
 static uint8_t s_q3_case2_start_req;
 static uint8_t s_q4_start_req;
 static uint8_t s_q4_case1_start_req;
+static uint8_t s_q4_case2_start_req;
+static uint8_t s_q4_case3_start_req;
+static uint8_t s_q4_case4_start_req;
 static uint8_t s_test1_start_req;
 static uint8_t s_test1_rec_start_req;
 static uint8_t s_test2_start_req;
@@ -26,6 +31,7 @@ static uint8_t s_test3_case1_start_req;
 static uint8_t s_test3_case2_start_req;
 static uint8_t s_test3_case3_start_req;
 static uint8_t s_test3_case4_start_req;
+static uint8_t s_test3_forward_extra_01m_after_q4; /* Q4-1～4 经 state 26 接 TEST3 时，首段直走 +0.1m */
 static uint8_t s_test4_start_req;
 static uint8_t s_test5_start_req;
 static uint8_t s_test6_start_req;
@@ -35,11 +41,9 @@ static uint8_t s_q4v_uart6_wait_resp;
 static uint8_t s_q4v_uart6_resp_ready;
 static uint8_t s_q4v_uart6_resp_code;
 static uint8_t s_pending_beeps;
-static uint8_t s_pd3_q4v_phase;   /* 0=未发 handshake，1=已发 AA CC DD，待第二次按键启动 Q4-V */
-static uint8_t s_pd3_bb_beep_done; /* 本周期内已对 AA CC BB 蜂鸣过一次 */
 static StepperMotorDrv s_stepper_motor;
 static uint8_t s_stepper_motor_inited;
-static uint8_t s_stepper_motor_enabled;
+static uint8_t s_stepper_motor_enabled; /* 0=解锁(失能) 1=锁定(使能)，与 AA BB 0C/0D / PD3 同步 */
 static uint8_t s_heading_lock_enabled;
 static uint8_t s_heading_lock_init_done;
 static GwGraySensor s_gray_sensor;
@@ -58,8 +62,6 @@ static int32_t s_measure_corr_rz10000;
 #define APP_MEAS_EXPECT_CROSS_COUNT 3U
 #define APP_CROSS_ON_CONFIRM_FRAMES   4U /* 原为 7；越低越多误触发风险 */
 #define APP_CROSS_OFF_CONFIRM_FRAMES  3U /* 原为 4 */
-#define APP_DIST_CM_X10_MIN 10U  /* 1.0cm */
-#define APP_DIST_CM_X10_MAX 50U  /* 5.0cm */
 static uint8_t s_meas_log_cross_idx[APP_MEAS_LOG_MAX];
 static uint32_t s_meas_log_dist_x10[APP_MEAS_LOG_MAX];
 static uint8_t s_meas_log_has_dist[APP_MEAS_LOG_MAX];
@@ -289,6 +291,7 @@ static void App_Motion_StopAndBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_
   s_q4v_uart6_wait_resp = 0U;
   s_q4v_uart6_resp_ready = 0U;
   s_q4v_uart6_resp_code = 0U;
+  s_test3_forward_extra_01m_after_q4 = 0U;
   *mode = 0U;
   *state = 0U;
   *wait_ticks = 0U;
@@ -314,11 +317,27 @@ static void App_Motion_StopNoBeep(uint8_t *mode, uint8_t *state, uint8_t *wait_t
   s_q4v_uart6_wait_resp = 0U;
   s_q4v_uart6_resp_ready = 0U;
   s_q4v_uart6_resp_code = 0U;
+  s_test3_forward_extra_01m_after_q4 = 0U;
   *mode = 0U;
   *state = 0U;
   *wait_ticks = 0U;
   *round = 0U;
   *ret_seg = 0U;
+}
+
+/* 实际距离 D(cm) = 0.106986*M - 1.633710，M = dt_ms * 0.15；dist_cm_x10 = round(10*D) */
+static uint32_t App_CrossDistCmX10FromDtMs(uint32_t dt_ms)
+{
+  int64_t n;
+
+  if (dt_ms == 0U) {
+    return 0U;
+  }
+  n = (int64_t)APP_CROSS_DIST_LIN_A_NUM * (int64_t)dt_ms - (int64_t)APP_CROSS_DIST_LIN_B_NUM;
+  if (n <= 0LL) {
+    return 0U;
+  }
+  return (uint32_t)((n + (int64_t)APP_CROSS_DIST_LIN_ROUND) / (int64_t)APP_CROSS_DIST_LIN_DIV);
 }
 
 static uint8_t App_AppendCm1ToMsg(uint8_t *msg, uint8_t n, uint32_t dist_cm_x10)
@@ -500,12 +519,7 @@ static void App_AnalyzeTest1RecBuffer(void)
     s_meas_log_has_dist[slot] = 0U;
     if (i >= 1U) {
       dt_ms = ticks[i] - ticks[i - 1U];
-      dist_cm_x10 = (dt_ms * 1197U + 5000U) / 10000U;
-      if (dist_cm_x10 < APP_DIST_CM_X10_MIN) {
-        dist_cm_x10 = APP_DIST_CM_X10_MIN;
-      } else if (dist_cm_x10 > APP_DIST_CM_X10_MAX) {
-        dist_cm_x10 = APP_DIST_CM_X10_MAX;
-      }
+      dist_cm_x10 = App_CrossDistCmX10FromDtMs(dt_ms);
       s_meas_log_dist_x10[slot] = dist_cm_x10;
       s_meas_log_has_dist[slot] = 1U;
     }
@@ -574,16 +588,24 @@ static void App_Test1Rec_SendFireWaterUsart1(void)
   }
 }
 
-/* TEST1-GYCK：Ping + 读数字量；成功蜂鸣 1 次，失败队列蜂鸣 2 次（PD4 或 AA BB DB） */
+/* TEST1-GYCK：连续 10 次（Ping → 读数字量）均成功才算成功；成功蜂鸣 1 次，失败队列蜂鸣 2 次（PD4 或 AA BB DB） */
 static void App_Test1Gyck_CheckAndBeep(void)
 {
-  bool ok;
+  uint8_t i;
+  bool ok = true;
 
-  ok = GwGray_Ping(&s_gray_sensor);
-  if (ok != false) {
-    ok = GwGray_ReadDigitalUpdate(&s_gray_sensor);
+  for (i = 0U; i < 10U; i++) {
+    if (!GwGray_Ping(&s_gray_sensor)) {
+      ok = false;
+      break;
+    }
+    if (!GwGray_ReadDigitalUpdate(&s_gray_sensor)) {
+      ok = false;
+      break;
+    }
   }
-  if (ok != false) {
+
+  if (ok) {
     BuzzerDrv_Beep(80U);
   } else {
     s_pending_beeps = 2U;
@@ -674,15 +696,8 @@ static void App_ProcessCrossDetect10ms(void)
           uint32_t dt_ms;
           uint32_t dist_cm_x10;
           dt_ms = now_ms - s_test1_last_cross_tick_ms;
-          /* 距离(cm,保留1位) = 时间(ms) * 0.15(m/s) * 0.798 * 100 * 10 / 1000
-           * = 时间(ms) * 119.7 / 1000
-           */
-          dist_cm_x10 = (dt_ms * 1197U + 5000U) / 10000U;
-          if (dist_cm_x10 < APP_DIST_CM_X10_MIN) {
-            dist_cm_x10 = APP_DIST_CM_X10_MIN;
-          } else if (dist_cm_x10 > APP_DIST_CM_X10_MAX) {
-            dist_cm_x10 = APP_DIST_CM_X10_MAX;
-          }
+          /* D = 0.106986*M - 1.633710（cm），M = dt_ms * 0.15；见 fw_config APP_CROSS_DIST_LIN_* */
+          dist_cm_x10 = App_CrossDistCmX10FromDtMs(dt_ms);
           if (slot < APP_MEAS_LOG_MAX) {
             s_meas_log_dist_x10[slot] = dist_cm_x10;
             s_meas_log_has_dist[slot] = 1U;
@@ -810,6 +825,10 @@ static void App_Task_10ms(void)
     s_q3_case1_start_req = 0U;
     s_q3_case2_start_req = 0U;
     s_q4_start_req = 0U;
+    s_q4_case1_start_req = 0U;
+    s_q4_case2_start_req = 0U;
+    s_q4_case3_start_req = 0U;
+    s_q4_case4_start_req = 0U;
     s_test1_start_req = 0U;
     s_test1_rec_start_req = 0U;
     s_test2_start_req = 0U;
@@ -817,19 +836,23 @@ static void App_Task_10ms(void)
     s_test6_start_req = 0U;
     s_test7_active = 0U;
     s_test7_prev_raw_cross = 0U;
-    s_pd3_q4v_phase = 0U;
-    s_pd3_bb_beep_done = 0U;
     s_heading_lock_init_done = 0U;
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD3)) {
-    static const uint8_t k_uart6_aa_cc_dd[3] = {0xAAU, 0xCCU, 0xDDU};
-    if (s_pd3_q4v_phase == 0U) {
-      if (DebugUart6_Send(k_uart6_aa_cc_dd, 3U, 50U) == HAL_OK) {
-        s_pd3_q4v_phase = 1U;
-        s_pd3_bb_beep_done = 0U;
+    HAL_StatusTypeDef st_sm;
+    if (s_stepper_motor_inited != 0U) {
+      if (s_stepper_motor_enabled == 0U) {
+        st_sm = StepperMotorDrv_Enable(&s_stepper_motor);
+        if (st_sm == HAL_OK) {
+          s_stepper_motor_enabled = 1U;
+          BuzzerDrv_Beep(80U);
+        }
+      } else {
+        st_sm = StepperMotorDrv_Disable(&s_stepper_motor);
+        if (st_sm == HAL_OK) {
+          s_stepper_motor_enabled = 0U;
+          BuzzerDrv_Beep(80U);
+        }
       }
-    } else {
-      s_q4_start_req = 1U; /* Q4-V，与同任务串口 AA BB 0B 等价 */
-      s_pd3_q4v_phase = 0U;
     }
   } else if (ButtonDrv_WasPressed(BUTTON_DRV_PD4)) {
     App_Test1Gyck_CheckAndBeep();
@@ -931,22 +954,30 @@ static void App_Task_10ms(void)
         } else if (rx == 0xD9U) {
           App_Test7_UserToggle();
         } else if (rx == 0x08U) {
-          if (s_stepper_motor_inited != 0U) {
-            (void)StepperMotorDrv_Enable(&s_stepper_motor);
-          }
+          s_q4_case2_start_req = 1U; /* Q4-2 */
         } else if (rx == 0x09U) {
-          if (s_stepper_motor_inited != 0U) {
-            (void)StepperMotorDrv_Disable(&s_stepper_motor);
-          }
+          s_q4_case3_start_req = 1U; /* Q4-3 */
         } else if (rx == 0x0AU) {
+          s_q4_case4_start_req = 1U; /* Q4-4 */
+        } else if (rx == 0x0BU) {
+          s_q4_start_req = 1U; /* Q4-V */
+        } else if (rx == 0x0CU) {
+          if (s_stepper_motor_inited != 0U &&
+              StepperMotorDrv_Enable(&s_stepper_motor) == HAL_OK) {
+            s_stepper_motor_enabled = 1U;
+          }
+        } else if (rx == 0x0DU) {
+          if (s_stepper_motor_inited != 0U &&
+              StepperMotorDrv_Disable(&s_stepper_motor) == HAL_OK) {
+            s_stepper_motor_enabled = 0U;
+          }
+        } else if (rx == 0x0EU) {
           if (s_stepper_motor_inited != 0U) {
             s_stepper_motor.pos_mode = STEPPER_POS_RELATIVE;
             s_stepper_motor.speed = stepper_speed_turn;
             s_stepper_motor.pulse = -stepper_pulse_90deg; /* 左转90度 */
             (void)StepperMotorDrv_RunPosition(&s_stepper_motor);
           }
-        } else if (rx == 0x0BU) {
-          s_q4_start_req = 1U; /* Q4-V */
         }
         s_uart_seq_state = (rx == 0xAAU) ? 1U : 0U;
       }
@@ -1005,11 +1036,6 @@ static void App_Task_10ms(void)
           s_q4v_uart6_resp_code = rx6;
           s_q4v_uart6_resp_ready = 1U;
         }
-      } else if (s_uart6_rx_prev2 == 0xAAU && s_uart6_rx_prev1 == 0xCCU && rx6 == 0xBBU) {
-        if (s_pd3_q4v_phase != 0U && s_pd3_bb_beep_done == 0U) {
-          BuzzerDrv_Beep(80U);
-          s_pd3_bb_beep_done = 1U;
-        }
       }
 
       s_uart6_rx_prev2 = s_uart6_rx_prev1;
@@ -1036,7 +1062,7 @@ static void App_Task_100ms(void)
 #if FW_Q1_ENABLE != 0
   static uint8_t s_boot_guard_init;
   static uint32_t s_boot_guard_deadline_ms;
-  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4-V,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4,14=Q4-1,15=TEST1-REC */
+  static uint8_t s_mode; /* 1=Q1,2=Q2-1,3=Q2-2,4=Q3-1,5=Q3-2,6=Q4-V,7=TEST1,8=TEST2,9=TEST3-1,10=TEST3-2,11=TEST3-3,12=TEST3-4,13=TEST4,14=Q4-1,15=TEST1-REC,16=Q4-2,17=Q4-3,18=Q4-4 */
   static uint8_t s_state;
   static uint8_t s_wait_ticks;
   static uint8_t s_round;
@@ -1044,42 +1070,68 @@ static void App_Task_100ms(void)
   HAL_StatusTypeDef st;
 
   const int32_t pre_move_y_m21739 = 1739; /* 0.08m * 21739 */
+  const int32_t move_py_back_005_m21739 = 1087; /* 0.05m * 21739，Q2-1 收尾后退（SendAdaptConstPMove 的 Py 取负） */
+  const int32_t move_py_q2_2_back_011_m21739 = 2391; /* 0.11m * 21739，Q2-2 收尾后退 */
   const int32_t move_px_m21739 = 0;
   const int32_t move_py_m21739 = 21739; /* 1.0m * 21739 */
-  const int32_t move_py_test1_02_m21739 = 4348; /* 0.2m * 21739 */
+  const int32_t move_py_measure_calib_straight_m21739 = 5435; /* 0.25m * 21739，测距校准段直走（0.2m+0.05m） */
   const int32_t move_py_test1_04_m21739 = 8696; /* 0.4m * 21739 */
   const int32_t move_py_q3_case2_start_m21739 = 2174; /* 0.1m * 21739 */
-  const int32_t move_py_test3_case1_m21739 = 16196; /* 0.745m * 21739 */
-  const int32_t move_py_test3_case2_m21739 = 16196; /* 0.745m * 21739 */
-  const int32_t move_py_test3_case3_m21739 = 10217; /* 0.47m * 21739 */
-  const int32_t move_py_test3_case4_m21739 = 20435; /* 0.94m * 21739 */
+  const int32_t move_py_test3_case1_m21739 = 15109; /* 0.695m * 21739 */
+  const int32_t move_py_test3_case2_m21739 = 15109; /* 0.695m * 21739 */
+  const int32_t move_py_test3_case3_m21739 = 9130; /* 0.42m * 21739 */
+  const int32_t move_py_test3_case4_m21739 = 19348; /* 0.89m * 21739 */
   const int32_t move_py_half_m21739 = 10870; /* 0.5m * 21739 */
   const int32_t move_py_q4_first_m21739 = 11957; /* 0.55m * 21739 */
   const int32_t move_py_q4_second_m21739 = 9783; /* 0.45m * 21739 */
-  const int32_t move_py_ret_last_m21739 = 19565; /* 0.9m * 21739 */
-  const int32_t move_py_q1_last_m21739 = 20000; /* 0.92m * 21739 */
+  const int32_t move_py_ret_last_m21739 = 19565; /* 0.90m * 21739，Q3-2 测距后末段 */
+  const int32_t move_py_q2_ret_last_m21739 = 20652; /* 0.95m * 21739：Q2-2 去程第3轮（调头前末段） */
+  const int32_t move_py_q2_1_first_straight_m21739 = 21304; /* 0.98m * 21739：仅 Q2-1 去程第1轮 */
+  const int32_t move_py_q2_1_out_last_m21739 = 19565; /* 0.90m * 21739：仅 Q2-1 去程第3轮（较 0.95m 少 0.05m） */
+  const int32_t move_py_q2_return_last_m21739 = 21304; /* 0.98m * 21739：仅 Q2-2 返程末段（较 0.95m 多 0.03m） */
+  const int32_t move_py_q2_1_return_last_m21739 = 20652; /* 0.95m * 21739：仅 Q2-1 返程末段（较 0.98m 少 0.03m） */
+  const int32_t move_py_q2_return_second_m21739 = 21521; /* 0.99m * 21739：Q2 返程第2段（较 0.94m 多 0.05m） */
+  const int32_t move_py_q2_1_ret_first_m21739 = 19782; /* 0.91m * 21739，仅 Q2-1 调头后返程首段 */
+  const int32_t move_py_q2_2_ret_first_m21739 = 20435; /* 0.94m * 21739，Q2-2 调头后第一段 */
+  const int32_t move_py_q2_2_round2_straight_m21739 = 20652; /* 0.95m * 21739，仅 Q2-2 去程第 2 轮直走（较 1.0m 少 0.05m） */
+  const int32_t move_py_q1_last_m21739 = 20000; /* 0.92m * 21739，Q4-V末段 */
+  const int32_t move_py_q3_case1_last_m21739 = 20435; /* 0.94m * 21739，Q3-1末段 */
+  const int32_t move_py_q1_final_straight_m21739 = 20435; /* 0.94m * 21739，仅 Q1 第4轮末段较 0.92m 多 0.02m */
   const int32_t move_pz_m21739 = 0;
   const int16_t move_speed_mps100 = 3000; /* 30 m/s * 100 */
   const int16_t move_speed_q4v_last_seg_mps100 = 1500; /* 速度15档，Q4-V末段0.92m直走 */
   const int16_t move_speed_q3_case1_uniform_mps100 = 1000; /* 10 m/s * 100 */
   const int16_t move_speed_q3_case2_uniform_mps100 = 1000; /* 10 m/s * 100 */
+  const int16_t move_speed_measure_calib_straight_mps100 = 1200; /* 12 * 100：TEST1/Q3-1 测距校准段 0.25m 直走 */
   const int16_t move_speed_detect_mps100 = 500; /* 5 m/s * 100，仅0.6m检测段 */
   const int32_t stepper_pulse_90deg = 800;
   const int32_t stepper_speed_turn = 100;
   const int32_t rot_left_90 = -900000;  /* -90deg * 10000 */
-  const int32_t rot_left_1535 = -1535000; /* -153.5deg * 10000 */
-  const int32_t rot_left_1165 = -1165000; /* -116.5deg * 10000 */
-  const int32_t rot_left_135 = -1350000; /* -135deg * 10000 */
+  const int32_t rot_left_140 = -1400000; /* -140deg * 10000 */
+  const int32_t rot_left_1065 = -1065000; /* -106.5deg * 10000 */
+  const int32_t rot_left_125 = -1250000; /* -125deg * 10000 */
   const int32_t rot_right_90 = 900000;  /* +90deg * 10000 */
   const int32_t rot_u_turn = -1800000;  /* -180deg * 10000 */
-  const int16_t rot_vmax = 1500;        /* 15 deg/s * 100 */
-  const int16_t rot_vmax_q3_case2_slow = 1200; /* 12 deg/s * 100，Q3-2后3次右转慢一点 */
-  const uint8_t wait_ticks_q3_case2_first_turn = 2U; /* 第1次右转后等待减少200ms */
-  const uint8_t wait_ticks_q3_case2_other_turn = 4U; /* 后3次右转后等待减少200ms */
+  const int16_t rot_vmax = 1800;        /* 18 deg/s * 100，非 90° 转向 */
+  const int16_t rot_vmax_90 = 1500;     /* ±90° */
+  const int16_t rot_vmax_u_turn = 1500; /* 180° 调头 */
+  const int16_t rot_vmax_q3_case2_slow = 1500; /* Q3-2 内 90°（与 `rot_vmax_90` 一致） */
+  const uint8_t wait_ticks_q3_case2_first_turn = 3U; /* Q3-2 首轮右转 90° 后：原 1 tick，+200ms → 3 ticks */
+  const uint8_t wait_ticks_q3_case2_other_turn = 5U; /* 除首轮外：循环第 2 次右转、`state 99`；较 3 ticks +200ms */
+  const uint8_t wait_ticks_q3_case2_after_measure_90 = 3U; /* `state 102`：较原 1 tick +200ms；仍较 `other_turn` 少 200ms */
   const uint8_t wait_ticks_default = 14U;          /* 1.4s */
+  const uint8_t wait_ticks_q2_ret_first_settle = 15U; /* 1.5s：仅调头后第一段直走后 state 10（较默认多 100ms） */
+  const uint8_t wait_ticks_q2_ret_second_settle = 17U; /* 1.7s：返程第2段直走后 state 10（较 1.4s 默认多 300ms） */
+  const uint8_t wait_ticks_turn90_settle = 4U;      /* 0.4s，±90° 转向后稳定（原 5 ticks 减 100ms） */
+  const uint8_t wait_ticks_turn90_q2_settle = 6U;   /* 0.6s，仅 Q2-1/Q2-2 的 90° 转向后稳定 */
+  const uint8_t wait_ticks_turn90_q1_settle = 2U;   /* 0.2s，仅 Q1：`state 4`（较 0.3s 再少 100ms） */
+  const uint8_t wait_ticks_turn90_q31_round2 = 0U;  /* Q3-1 测距替换段前最后一次 90° 后：原 0.2s 再减 300ms → 0（tick 下限） */
+  const uint8_t wait_ticks_turn90_q31_after_detect_seg = 2U; /* Q3-1 检测段所在替换流程结束后、主循环下一弯：较默认 0.4s 少 200ms */
+  const uint8_t wait_ticks_turn90_ret_corner = 4U; /* 0.4s，Q2 返程拐点 90° 后 */
   const uint8_t wait_ticks_detect_seg = 22U;       /* 约2.2s，0.4m检测段等待 */
   const uint8_t wait_ticks_pre_detect = 6U;        /* 0.6s，校准直行后进入测量段前等待 */
   const uint8_t wait_ticks_q3_case1_uniform = 28U; /* 2.8s */
+  const uint8_t wait_ticks_q4_after_step8 = 16U; /* 1.6s：Q4 第 8 步直走后稳定（`state 26`，原 3s 减 1400ms） */
 
   if (s_boot_guard_init == 0U) {
     s_boot_guard_init = 1U;
@@ -1094,6 +1146,9 @@ static void App_Task_100ms(void)
     s_q3_case2_start_req = 0U;
     s_q4_start_req = 0U;
     s_q4_case1_start_req = 0U;
+    s_q4_case2_start_req = 0U;
+    s_q4_case3_start_req = 0U;
+    s_q4_case4_start_req = 0U;
     s_test1_start_req = 0U;
     s_test1_rec_start_req = 0U;
     s_test2_start_req = 0U;
@@ -1105,6 +1160,7 @@ static void App_Task_100ms(void)
     s_test6_start_req = 0U;
     s_test7_active = 0U;
     s_test7_prev_raw_cross = 0U;
+    s_test3_forward_extra_01m_after_q4 = 0U;
     s_mode = 0U;
     s_state = 0U;
     s_wait_ticks = 0U;
@@ -1200,6 +1256,7 @@ static void App_Task_100ms(void)
   } else if (s_q4_case1_start_req != 0U) {
     s_q4_case1_start_req = 0U;
     BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
     s_q3_case1_cross_detect_active = 0U;
     s_q3_case1_cross_count = 0U;
     s_q3_case1_cross_latched = 0U;
@@ -1207,6 +1264,51 @@ static void App_Task_100ms(void)
     s_test1_last_cross_valid = 0U;
     s_test1_last_cross_tick_ms = 0U;
     s_mode = 14U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q4_case2_start_req != 0U) {
+    s_q4_case2_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_test1_dist_measure_active = 0U;
+    s_test1_last_cross_valid = 0U;
+    s_test1_last_cross_tick_ms = 0U;
+    s_mode = 16U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q4_case3_start_req != 0U) {
+    s_q4_case3_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_test1_dist_measure_active = 0U;
+    s_test1_last_cross_valid = 0U;
+    s_test1_last_cross_tick_ms = 0U;
+    s_mode = 17U;
+    s_state = 1U;
+    s_wait_ticks = 0U;
+    s_round = 0U;
+    s_ret_seg = 0U;
+  } else if (s_q4_case4_start_req != 0U) {
+    s_q4_case4_start_req = 0U;
+    BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
+    s_q3_case1_cross_detect_active = 0U;
+    s_q3_case1_cross_count = 0U;
+    s_q3_case1_cross_latched = 0U;
+    s_test1_dist_measure_active = 0U;
+    s_test1_last_cross_valid = 0U;
+    s_test1_last_cross_tick_ms = 0U;
+    s_mode = 18U;
     s_state = 1U;
     s_wait_ticks = 0U;
     s_round = 0U;
@@ -1255,6 +1357,7 @@ static void App_Task_100ms(void)
   } else if (s_test3_case1_start_req != 0U) {
     s_test3_case1_start_req = 0U;
     BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
     s_q3_case1_cross_detect_active = 0U;
     s_q3_case1_cross_count = 0U;
     s_q3_case1_cross_latched = 0U;
@@ -1269,6 +1372,7 @@ static void App_Task_100ms(void)
   } else if (s_test3_case2_start_req != 0U) {
     s_test3_case2_start_req = 0U;
     BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
     s_q3_case1_cross_detect_active = 0U;
     s_q3_case1_cross_count = 0U;
     s_q3_case1_cross_latched = 0U;
@@ -1283,6 +1387,7 @@ static void App_Task_100ms(void)
   } else if (s_test3_case3_start_req != 0U) {
     s_test3_case3_start_req = 0U;
     BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
     s_q3_case1_cross_detect_active = 0U;
     s_q3_case1_cross_count = 0U;
     s_q3_case1_cross_latched = 0U;
@@ -1297,6 +1402,7 @@ static void App_Task_100ms(void)
   } else if (s_test3_case4_start_req != 0U) {
     s_test3_case4_start_req = 0U;
     BuzzerDrv_Beep(80U);
+    s_test3_forward_extra_01m_after_q4 = 0U;
     s_q3_case1_cross_detect_active = 0U;
     s_q3_case1_cross_count = 0U;
     s_q3_case1_cross_latched = 0U;
@@ -1325,7 +1431,7 @@ static void App_Task_100ms(void)
   }
 
   switch (s_state) {
-    case 0U: /* 等待 PD3(Q1) / PD4(Q2-1) / PD5(Q2-2) */
+    case 0U: /* 空闲：任务由串口或其它入口启动 */
       return;
 
     case 1U: /* 启动动作：Q3-2按专用流程，其余先前进0.08m */
@@ -1334,7 +1440,7 @@ static void App_Task_100ms(void)
         s_round = 0U;
         s_state = 92U;
         break;
-      } else if (s_mode == 6U || s_mode == 14U) {
+      } else if (s_mode == 6U || s_mode == 14U || s_mode == 16U || s_mode == 17U || s_mode == 18U) {
         st = DflinkChassis_SendAdaptConstPMove(0, pre_move_y_m21739, 0,
                                                move_speed_mps100, 200U);
         if (st != HAL_OK) {
@@ -1363,7 +1469,7 @@ static void App_Task_100ms(void)
 
     case 3U: /* Q1/Q2-1/Q3-1左转90；Q2-2右转90 */
       st = DflinkChassis_SendRotation(
-          0, 0, (s_mode == 3U) ? rot_right_90 : rot_left_90, rot_vmax, 200U);
+          0, 0, (s_mode == 3U) ? rot_right_90 : rot_left_90, rot_vmax_90, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1371,8 +1477,17 @@ static void App_Task_100ms(void)
       s_state = 4U;
       break;
 
-    case 4U: /* 转向稳定等待约 0.5s */
-      if (s_wait_ticks++ < ((s_mode == 4U && s_round == 1U) ? 3U : 5U)) {
+    case 4U: /* 转向稳定：Q1 0.2s；Q2 0.6s；Q3-1 特例 0s/0.2s；其余 0.4s */
+      if (s_wait_ticks++ <
+          ((s_mode == 4U && s_round == 1U)
+               ? wait_ticks_turn90_q31_round2
+               : ((s_mode == 4U && s_round == 2U)
+                      ? wait_ticks_turn90_q31_after_detect_seg
+                      : ((s_mode == 1U)
+                             ? wait_ticks_turn90_q1_settle
+                             : ((s_mode == 2U || s_mode == 3U)
+                                    ? wait_ticks_turn90_q2_settle
+                                    : wait_ticks_turn90_settle))))) {
         return;
       }
       s_wait_ticks = 0U;
@@ -1391,11 +1506,23 @@ static void App_Task_100ms(void)
       s_test1_dist_measure_active = 0U;
       s_test1_last_cross_valid = 0U;
       s_test1_last_cross_tick_ms = 0U;
-      st = DflinkChassis_SendAdaptConstPMove(
-          move_px_m21739,
-          ((s_mode == 1U || s_mode == 4U) && s_round >= 3U) ? move_py_q1_last_m21739
-                                                             : move_py_m21739,
-          move_pz_m21739, move_speed_mps100, 200U);
+      {
+        int32_t py_seg;
+
+        if ((s_mode == 1U || s_mode == 4U) && s_round >= 3U) {
+          py_seg = (s_mode == 1U) ? move_py_q1_final_straight_m21739 : move_py_q3_case1_last_m21739;
+        } else if (s_mode == 2U && s_round == 0U) {
+          py_seg = move_py_q2_1_first_straight_m21739; /* Q2-1：去程第 1 轮直走 0.98m */
+        } else if ((s_mode == 2U || s_mode == 3U) && s_round == 2U) {
+          py_seg = (s_mode == 2U) ? move_py_q2_1_out_last_m21739 : move_py_q2_ret_last_m21739;
+        } else if (s_mode == 3U && s_round == 1U) {
+          py_seg = move_py_q2_2_round2_straight_m21739; /* Q2-2：去程第 2 轮直走 0.95m */
+        } else {
+          py_seg = move_py_m21739;
+        }
+        st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, py_seg, move_pz_m21739, move_speed_mps100,
+                                              200U);
+      }
       if (st != HAL_OK) {
         return;
       }
@@ -1434,7 +1561,7 @@ static void App_Task_100ms(void)
       if (s_mode != 2U && s_mode != 3U) {
         return;
       }
-      st = DflinkChassis_SendRotation(0, 0, rot_u_turn, rot_vmax, 200U);
+      st = DflinkChassis_SendRotation(0, 0, rot_u_turn, rot_vmax_u_turn, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1442,18 +1569,30 @@ static void App_Task_100ms(void)
       s_state = 8U;
       break;
 
-    case 8U: /* 调头稳定等待约 0.7s */
-      if (s_wait_ticks++ < 7U) {
+    case 8U: /* Q2 调头稳定等待约 0.9s */
+      if (s_wait_ticks++ < 9U) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 9U;
       break;
 
-    case 9U: /* Q2 返程：先两段1m，最后0.9m */
-      st = DflinkChassis_SendAdaptConstPMove(
-          move_px_m21739, (s_ret_seg < 2U) ? move_py_m21739 : move_py_ret_last_m21739,
-          move_pz_m21739, move_speed_mps100, 200U);
+    case 9U: /* Q2 返程：`s_ret_seg` 0/1/2；第2段 0.99m；末段 Q2-1 0.95m、Q2-2 0.98m；首段 Q2-1 0.91m、Q2-2 0.94m */
+      {
+        int32_t py_ret;
+
+        if (s_ret_seg >= 2U) {
+          py_ret = (s_mode == 2U) ? move_py_q2_1_return_last_m21739 : move_py_q2_return_last_m21739;
+        } else if (s_mode == 3U && s_ret_seg == 0U) {
+          py_ret = move_py_q2_2_ret_first_m21739;
+        } else if (s_ret_seg == 0U) {
+          py_ret = move_py_q2_1_ret_first_m21739; /* Q2-1 调头后返程首段 0.91m */
+        } else {
+          py_ret = move_py_q2_return_second_m21739; /* s_ret_seg==1，返程第2段 0.99m */
+        }
+        st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, py_ret, move_pz_m21739, move_speed_mps100,
+                                              200U);
+      }
       if (st != HAL_OK) {
         return;
       }
@@ -1461,13 +1600,18 @@ static void App_Task_100ms(void)
       s_state = 10U;
       break;
 
-    case 10U: /* 返程位移稳定等待约 1.4s */
-      if (s_wait_ticks++ < wait_ticks_default) {
+    case 10U: /* 返程位移稳定：首段 1.5s，第2段 1.7s，第3段 1.4s */
+      if (s_wait_ticks++ <
+          ((s_ret_seg == 0U)
+               ? wait_ticks_q2_ret_first_settle
+               : ((s_ret_seg == 1U) ? wait_ticks_q2_ret_second_settle : wait_ticks_default))) {
         return;
       }
       s_wait_ticks = 0U;
       if (s_ret_seg < 2U) {
         s_state = 11U;
+      } else if (s_mode == 2U || s_mode == 3U) {
+        s_state = 127U; /* Q2 末段后再转 90° */
       } else {
         s_state = 12U;
       }
@@ -1475,7 +1619,7 @@ static void App_Task_100ms(void)
 
     case 11U: /* Q2返程拐点: Q2-1右转90, Q2-2左转90 */
       st = DflinkChassis_SendRotation(
-          0, 0, (s_mode == 2U) ? rot_right_90 : rot_left_90, rot_vmax, 200U);
+          0, 0, (s_mode == 2U) ? rot_right_90 : rot_left_90, rot_vmax_90, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1483,8 +1627,8 @@ static void App_Task_100ms(void)
       s_state = 14U;
       break;
 
-    case 14U: /* 右转稳定等待约 0.3s */
-      if (s_wait_ticks++ < 3U) {
+    case 14U: /* Q2 返程拐角 90° 后稳定等待约 0.4s */
+      if (s_wait_ticks++ < wait_ticks_turn90_ret_corner) {
         return;
       }
       s_wait_ticks = 0U;
@@ -1492,7 +1636,45 @@ static void App_Task_100ms(void)
       s_state = 9U;
       break;
 
-    case 12U: /* Q2 完成（含原路返回） */
+    case 127U: /* Q2-1 结束后左转 90°；Q2-2 结束后右转 90° */
+      st = DflinkChassis_SendRotation(0, 0, (s_mode == 2U) ? rot_left_90 : rot_right_90, rot_vmax_90, 200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 128U;
+      break;
+
+    case 128U: /* Q2 末次 90° 转向后稳定等待约 0.6s */
+      if (s_wait_ticks++ < wait_ticks_turn90_q2_settle) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 129U;
+      break;
+
+    case 129U: /* Q2：收尾后退，Q2-1 0.05m / Q2-2 0.11m（body -Y） */
+      st = DflinkChassis_SendAdaptConstPMove(
+          move_px_m21739,
+          -((s_mode == 3U) ? move_py_q2_2_back_011_m21739 : move_py_back_005_m21739),
+          move_pz_m21739,
+          move_speed_mps100,
+          200U);
+      if (st != HAL_OK) {
+        return;
+      }
+      s_wait_ticks = 0U;
+      s_state = 130U;
+      break;
+
+    case 130U: /* 后退位移稳定等待约 1.4s */
+      if (s_wait_ticks++ < wait_ticks_default) {
+        return;
+      }
+      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
+      break;
+
+    case 12U: /* Q2 完成（若未进入 127～130 则原路停机） */
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
@@ -1512,7 +1694,7 @@ static void App_Task_100ms(void)
       break;
 
     case 17U: /* Q4-V 左转 90 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax, 200U);
+      st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax_90, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1520,8 +1702,8 @@ static void App_Task_100ms(void)
       s_state = 18U;
       break;
 
-    case 18U: /* Q4-V 转向稳定等待约 0.5s */
-      if (s_wait_ticks++ < 5U) {
+    case 18U: /* Q4-V 转向稳定等待约 0.4s（较原 0.5s 少 100ms） */
+      if (s_wait_ticks++ < wait_ticks_turn90_settle) {
         return;
       }
       s_wait_ticks = 0U;
@@ -1538,26 +1720,28 @@ static void App_Task_100ms(void)
       s_state = 126U;
       break;
 
-    case 126U: { /* Q4-V 第4步完成后：UART6 发送 AA CC 08 */
+    case 126U: { /* Q4-V 第4步完成后：UART6 发送 AA CC 08；Q4-1..4 全程不向 UART6 发 */
       static const uint8_t k_q4v_uart6_aa_cc_08[3] = {0xAAU, 0xCCU, 0x08U};
-      st = DebugUart6_Send(k_q4v_uart6_aa_cc_08, 3U, 50U);
-      if (st != HAL_OK) {
-        return;
+      if (s_mode == 6U) {
+        st = DebugUart6_Send(k_q4v_uart6_aa_cc_08, 3U, 50U);
+        if (st != HAL_OK) {
+          return;
+        }
       }
       s_wait_ticks = 0U;
       s_state = 20U;
       break;
     }
 
-    case 20U: /* Q4-V 等待 4.0s */
-      if (s_wait_ticks++ < 40U) {
+    case 20U: /* Q4-V 等待 4.0s；Q4-1..4 等待 1.0s */
+      if (s_wait_ticks++ < ((s_mode == 6U) ? 40U : 10U)) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 21U;
       break;
 
-    case 21U: /* Q4-V 再前进 0.5m（6s 等待后） */
+    case 21U: /* Q4-V 再前进 0.5m（Q4-V 在 4s 等待后；Q4-1..4 在 1s 等待后） */
       st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_half_m21739,
                                              move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
@@ -1576,7 +1760,7 @@ static void App_Task_100ms(void)
       break;
 
     case 23U: /* Q4-V 再左转 90 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax, 200U);
+      st = DflinkChassis_SendRotation(0, 0, rot_left_90, rot_vmax_90, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1590,28 +1774,36 @@ static void App_Task_100ms(void)
       s_state = 24U;
       break;
 
-    case 24U: /* Q4-V 再次转向稳定等待约 0.5s */
-      if (s_wait_ticks++ < 5U) {
+    case 24U: /* Q4-V 再次转向稳定等待约 0.4s（较原 0.5s 少 100ms） */
+      if (s_wait_ticks++ < wait_ticks_turn90_settle) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 29U;
       break;
 
-    case 29U: { /* Q4-V 第7步后：UART6 发送 AA CC 07 */
+    case 29U: { /* Q4-V 第7步后：UART6 发送 AA CC 07；Q4-1..4 全程不向 UART6 发 */
       static const uint8_t k_q4v_uart6_aa_cc_07[3] = {0xAAU, 0xCCU, 0x07U};
-      st = DebugUart6_Send(k_q4v_uart6_aa_cc_07, 3U, 50U);
-      if (st != HAL_OK) {
-        return;
+      if (s_mode == 6U) {
+        st = DebugUart6_Send(k_q4v_uart6_aa_cc_07, 3U, 50U);
+        if (st != HAL_OK) {
+          return;
+        }
       }
       s_wait_ticks = 0U;
       s_state = 25U;
       break;
     }
 
-    case 25U: /* Q4-V 最后前进 0.92m（直走速度15档） */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q1_last_m21739,
-                                             move_pz_m21739, move_speed_q4v_last_seg_mps100, 200U);
+    case 25U: /* Q4-V 最后前进 0.92m（速度15）；Q4-1..4 前进 1.0m（速度30） */
+      st = DflinkChassis_SendAdaptConstPMove(
+          move_px_m21739,
+          ((s_mode == 14U || s_mode == 16U || s_mode == 17U || s_mode == 18U) ? move_py_m21739
+                                                                         : move_py_q1_last_m21739),
+          move_pz_m21739,
+          ((s_mode == 14U || s_mode == 16U || s_mode == 17U || s_mode == 18U) ? move_speed_mps100
+                                                                         : move_speed_q4v_last_seg_mps100),
+          200U);
       if (st != HAL_OK) {
         return;
       }
@@ -1619,13 +1811,34 @@ static void App_Task_100ms(void)
       s_state = 26U;
       break;
 
-    case 26U: /* Q4-V 第8步直走后稳定等待约 3.0s */
-      if (s_wait_ticks++ < 30U) {
+    case 26U: /* Q4-V / Q4-1..4：第8步直走后稳定；Q4-1..4 不发 AA CC 00，直接接 TEST3-x */
+      if (s_wait_ticks++ < wait_ticks_q4_after_step8) {
         return;
       }
-      if (s_mode == 14U) {
+      if (s_mode == 14U || s_mode == 16U || s_mode == 17U || s_mode == 18U) {
+        s_q3_case1_cross_detect_active = 0U;
+        s_q3_case1_cross_count = 0U;
+        s_q3_case1_cross_latched = 0U;
+        s_test1_dist_measure_active = 0U;
+        s_test1_last_cross_valid = 0U;
+        s_test1_last_cross_tick_ms = 0U;
         s_wait_ticks = 0U;
-        s_state = 122U; /* Q4-1: Q4-V后接TEST3-2 */
+        s_round = 0U;
+        s_ret_seg = 0U;
+        s_test3_forward_extra_01m_after_q4 = 1U;
+        if (s_mode == 14U) { /* 等同 UART6 返回 01 -> TEST3-4 */
+          s_mode = 12U;
+          s_state = 82U;
+        } else if (s_mode == 16U) { /* 等同 02 -> TEST3-1 */
+          s_mode = 9U;
+          s_state = 70U;
+        } else if (s_mode == 17U) { /* 等同 03 -> TEST3-3 */
+          s_mode = 11U;
+          s_state = 78U;
+        } else { /* 18 -> 04 TEST3-2 */
+          s_mode = 10U;
+          s_state = 74U;
+        }
         break;
       }
       if (s_mode == 6U) {
@@ -1673,6 +1886,7 @@ static void App_Task_100ms(void)
       s_wait_ticks = 0U;
       s_round = 0U;
       s_ret_seg = 0U;
+      s_test3_forward_extra_01m_after_q4 = 0U;
 
       if (s_q4v_uart6_resp_code == 0x01U) {      /* AA CC 01 -> TEST3-4 */
         s_mode = 12U;
@@ -1691,7 +1905,7 @@ static void App_Task_100ms(void)
       }
       break;
 
-    case 30U: /* TEST1: 0.2m前先做灰度偏移修正 */
+    case 30U: /* TEST1: 校准直走前先做灰度偏移修正 */
       s_measure_corr_rz10000 = App_CalcGrayCorrRz10000();
       if (s_measure_corr_rz10000 != 0) {
         st = DflinkChassis_SendRotation(0, 0, s_measure_corr_rz10000, rot_vmax, 200U);
@@ -1713,9 +1927,9 @@ static void App_Task_100ms(void)
       s_state = 43U;
       break;
 
-    case 43U: /* TEST1: 匀速前进 0.2m */
-      st = DflinkChassis_SendVelDisplacement(move_px_m21739, move_py_test1_02_m21739,
-                                             move_pz_m21739, move_speed_q3_case2_uniform_mps100,
+    case 43U: /* TEST1: 匀速前进 0.25m（校准段） */
+      st = DflinkChassis_SendVelDisplacement(move_px_m21739, move_py_measure_calib_straight_m21739,
+                                             move_pz_m21739, move_speed_measure_calib_straight_mps100,
                                              200U);
       if (st != HAL_OK) {
         return;
@@ -1736,7 +1950,7 @@ static void App_Task_100ms(void)
       }
       break;
 
-    case 44U: /* TEST1: 0.2m后反向转回修正角度 */
+    case 44U: /* TEST1: 校准直走段结束后反向转回修正角度 */
       st = DflinkChassis_SendRotation(0, 0, -s_measure_corr_rz10000, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
@@ -1863,7 +2077,7 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 50U: /* Q3-1 第2段替换流程: 0.2m前先做灰度偏移修正 */
+    case 50U: /* Q3-1 第2段替换流程: 校准直走前先做灰度偏移修正 */
       s_measure_corr_rz10000 = App_CalcGrayCorrRz10000();
       if (s_measure_corr_rz10000 != 0) {
         st = DflinkChassis_SendRotation(0, 0, s_measure_corr_rz10000, rot_vmax, 200U);
@@ -1885,9 +2099,9 @@ static void App_Task_100ms(void)
       s_state = 60U;
       break;
 
-    case 60U: /* Q3-1 第2段替换流程: 匀速前进 0.2m */
-      st = DflinkChassis_SendVelDisplacement(move_px_m21739, move_py_test1_02_m21739,
-                                             move_pz_m21739, move_speed_q3_case2_uniform_mps100,
+    case 60U: /* Q3-1 第2段替换流程: 匀速前进 0.25m（校准段） */
+      st = DflinkChassis_SendVelDisplacement(move_px_m21739, move_py_measure_calib_straight_m21739,
+                                             move_pz_m21739, move_speed_measure_calib_straight_mps100,
                                              200U);
       if (st != HAL_OK) {
         return;
@@ -1908,7 +2122,7 @@ static void App_Task_100ms(void)
       }
       break;
 
-    case 61U: /* Q3-1 第2段替换流程: 0.2m后反向转回修正角度 */
+    case 61U: /* Q3-1 第2段替换流程: 校准直走段结束后反向转回修正角度 */
       st = DflinkChassis_SendRotation(0, 0, -s_measure_corr_rz10000, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
@@ -2005,8 +2219,8 @@ static void App_Task_100ms(void)
       }
       break;
 
-    case 70U: /* TEST3-1: 左转 153.5 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_1535, rot_vmax, 200U);
+    case 70U: /* TEST3-1: 左转 140 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_140, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -2022,15 +2236,20 @@ static void App_Task_100ms(void)
       s_state = 72U;
       break;
 
-    case 72U: /* TEST3-1: 前进 0.745m */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_test3_case1_m21739,
-                                             move_pz_m21739, move_speed_mps100, 200U);
+    case 72U: { /* TEST3-1: 前进 0.695m（经 Q4-1～4 接桩时为 0.795m） */
+      int32_t py_seg = move_py_test3_case1_m21739;
+      if (s_test3_forward_extra_01m_after_q4 != 0U) {
+        py_seg += move_py_q3_case2_start_m21739;
+        s_test3_forward_extra_01m_after_q4 = 0U;
+      }
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, py_seg, move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 73U;
       break;
+    }
 
     case 73U: /* TEST3-1: 稳定等待后停车 */
       if (s_wait_ticks++ < wait_ticks_default) {
@@ -2039,8 +2258,8 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 74U: /* TEST3-2: 左转 116.5 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_1165, rot_vmax, 200U);
+    case 74U: /* TEST3-2: 左转 106.5 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_1065, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -2056,15 +2275,20 @@ static void App_Task_100ms(void)
       s_state = 76U;
       break;
 
-    case 76U: /* TEST3-2: 前进 0.745m */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_test3_case2_m21739,
-                                             move_pz_m21739, move_speed_mps100, 200U);
+    case 76U: { /* TEST3-2: 前进 0.695m（经 Q4-1～4 接桩时为 0.795m） */
+      int32_t py_seg = move_py_test3_case2_m21739;
+      if (s_test3_forward_extra_01m_after_q4 != 0U) {
+        py_seg += move_py_q3_case2_start_m21739;
+        s_test3_forward_extra_01m_after_q4 = 0U;
+      }
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, py_seg, move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 77U;
       break;
+    }
 
     case 77U: /* TEST3-2: 稳定等待后停车 */
       if (s_wait_ticks++ < wait_ticks_default) {
@@ -2073,8 +2297,8 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 78U: /* TEST3-3: 左转 135 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_135, rot_vmax, 200U);
+    case 78U: /* TEST3-3: 左转 125 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_125, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -2090,15 +2314,20 @@ static void App_Task_100ms(void)
       s_state = 80U;
       break;
 
-    case 80U: /* TEST3-3: 前进 0.47m */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_test3_case3_m21739,
-                                             move_pz_m21739, move_speed_mps100, 200U);
+    case 80U: { /* TEST3-3: 前进 0.42m（经 Q4-1～4 接桩时为 0.52m） */
+      int32_t py_seg = move_py_test3_case3_m21739;
+      if (s_test3_forward_extra_01m_after_q4 != 0U) {
+        py_seg += move_py_q3_case2_start_m21739;
+        s_test3_forward_extra_01m_after_q4 = 0U;
+      }
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, py_seg, move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 81U;
       break;
+    }
 
     case 81U: /* TEST3-3: 稳定等待后停车 */
       if (s_wait_ticks++ < wait_ticks_default) {
@@ -2107,8 +2336,8 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 82U: /* TEST3-4: 左转 135 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_135, rot_vmax, 200U);
+    case 82U: /* TEST3-4: 左转 125 度 */
+      st = DflinkChassis_SendRotation(0, 0, rot_left_125, rot_vmax, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -2124,15 +2353,20 @@ static void App_Task_100ms(void)
       s_state = 84U;
       break;
 
-    case 84U: /* TEST3-4: 前进 0.94m */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_test3_case4_m21739,
-                                             move_pz_m21739, move_speed_mps100, 200U);
+    case 84U: { /* TEST3-4: 前进 0.89m（经 Q4-1～4 接桩时为 0.99m） */
+      int32_t py_seg = move_py_test3_case4_m21739;
+      if (s_test3_forward_extra_01m_after_q4 != 0U) {
+        py_seg += move_py_q3_case2_start_m21739;
+        s_test3_forward_extra_01m_after_q4 = 0U;
+      }
+      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, py_seg, move_pz_m21739, move_speed_mps100, 200U);
       if (st != HAL_OK) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 85U;
       break;
+    }
 
     case 85U: /* TEST3-4: 稳定等待后停车 */
       if (s_wait_ticks++ < wait_ticks_default) {
@@ -2194,40 +2428,6 @@ static void App_Task_100ms(void)
       App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
       break;
 
-    case 122U: /* Q4-1: 接续 TEST3-2 左转 116.5 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_left_1165, rot_vmax, 200U);
-      if (st != HAL_OK) {
-        return;
-      }
-      s_wait_ticks = 0U;
-      s_state = 123U;
-      break;
-
-    case 123U: /* Q4-1: 转向稳定等待 */
-      if (s_wait_ticks++ < 5U) {
-        return;
-      }
-      s_wait_ticks = 0U;
-      s_state = 124U;
-      break;
-
-    case 124U: /* Q4-1: 接续 TEST3-2 前进 0.745m */
-      st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_test3_case2_m21739,
-                                             move_pz_m21739, move_speed_mps100, 200U);
-      if (st != HAL_OK) {
-        return;
-      }
-      s_wait_ticks = 0U;
-      s_state = 125U;
-      break;
-
-    case 125U: /* Q4-1: 稳定等待后停车 */
-      if (s_wait_ticks++ < wait_ticks_default) {
-        return;
-      }
-      App_Motion_StopAndBeep(&s_mode, &s_state, &s_wait_ticks, &s_round, &s_ret_seg);
-      break;
-
     case 92U: /* Q3-2: 先自适应前进 0.1m */
       st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_q3_case2_start_m21739, move_pz_m21739,
                                              move_speed_mps100, 200U);
@@ -2255,8 +2455,7 @@ static void App_Task_100ms(void)
       break;
 
     case 95U: /* Q3-2: 右转 90 度 */
-      st = DflinkChassis_SendRotation(0, 0, rot_right_90,
-                                      (s_round == 0U) ? rot_vmax : rot_vmax_q3_case2_slow, 200U);
+      st = DflinkChassis_SendRotation(0, 0, rot_right_90, rot_vmax_90, 200U);
       if (st != HAL_OK) {
         return;
       }
@@ -2319,14 +2518,14 @@ static void App_Task_100ms(void)
       break;
 
     case 102U: /* Q3-2: 末次右转后稳定等待 */
-      if (s_wait_ticks++ < wait_ticks_q3_case2_other_turn) {
+      if (s_wait_ticks++ < wait_ticks_q3_case2_after_measure_90) {
         return;
       }
       s_wait_ticks = 0U;
       s_state = 103U;
       break;
 
-    case 103U: /* Q3-2: 末次自适应直走 0.9m */
+    case 103U: /* Q3-2: 末次自适应直走 0.90m */
       st = DflinkChassis_SendAdaptConstPMove(move_px_m21739, move_py_ret_last_m21739, move_pz_m21739,
                                              move_speed_mps100, 200U);
       if (st != HAL_OK) {

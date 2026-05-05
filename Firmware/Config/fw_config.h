@@ -16,4 +16,11 @@
 #define FW_Q1_ENABLE  1
 #endif
 
+/* 路口测距标定：M = dt_ms * 0.15（dt_ms 为相邻路口间隔 ms）；实际距离 D(cm) = 0.106986 * M - 1.633710。
+ * 下发 dist_cm_x10 = round(10*D) = (160479*dt_ms - 16337100 + 500000) / 1000000（≤0 时按 0）。 */
+#define APP_CROSS_DIST_LIN_A_NUM   160479L
+#define APP_CROSS_DIST_LIN_B_NUM   16337100L
+#define APP_CROSS_DIST_LIN_ROUND   500000L
+#define APP_CROSS_DIST_LIN_DIV     1000000L
+
 #endif
